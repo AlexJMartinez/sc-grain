@@ -52,6 +52,14 @@ s.waitForBoot({
 ~granV21[\visTime] = 0.0;
 ~granV21[\visRunning] = false;
 
+	~granV21[\view] = (
+	zoom: 1.0,       // 1 = full waveform
+	scroll: 0.0,     // 0..1 scroll through zoomed view
+	editMode: \region,
+	loopStart: 0.0,
+	loopEnd: 1.0
+);
+
 	~granV21[\params] = (
 		masterAmp: 0.35,
 		rootMidi: 60,
@@ -294,12 +302,19 @@ xyYTarget: \aJitter
 		^nil;
 	};
 
+	// stop anything currently sounding before swapping buffers
+	~granV21[\panic].value;
+	~granV21[\isPreviewing] = false;
+
 	~granV21[\buf] = buf;
 	~granV21[\sampleBuf] = buf;
 	~granV21[\samplePath] = label ? "Untitled";
 	~granV21[\params][\regionStart] = 0.0;
 	~granV21[\params][\regionEnd] = 1.0;
 	~granV21[\params][\position] = 0.5;
+
+		~granV21[\view][\loopStart] = 0.0;
+		~granV21[\view][\loopEnd] = 1.0;
 
 	~granV21[\grainDotsA].clear;
 	~granV21[\grainDotsB].clear;
@@ -308,6 +323,11 @@ xyYTarget: \aJitter
 		if(~granV21[\pathLabel].notNil) {
 			~granV21[\pathLabel].string_(~granV21[\samplePath]);
 			~granV21[\pathLabel].refresh;
+		};
+
+		if(~granV21[\playButton].notNil) {
+			~granV21[\playButton].value_(0);
+			~granV21[\playButton].refresh;
 		};
 
 		~granV21[\refreshWaveData].value;
@@ -389,6 +409,8 @@ xyYTarget: \aJitter
 		path = path.asString.standardizePath;
 		("Loading sample: " ++ path).postln;
 
+			~granV21[\panic].value;
+
 		if(~granV21[\sampleBuf].notNil) {
 			try { ~granV21[\sampleBuf].free } { };
 			~granV21[\sampleBuf] = nil;
@@ -461,9 +483,20 @@ xyYTarget: \aJitter
 	};
 
 	~granV21[\previewOff] = {
-		~granV21[\noteOff].value(~granV21[\previewNote]);
-		~granV21[\isPreviewing] = false;
+	~granV21[\noteOff].value(~granV21[\previewNote]);
+	~granV21[\isPreviewing] = false;
+
+	~granV21[\grainDotsA].clear;
+	~granV21[\grainDotsB].clear;
+
+	if(~granV21[\playButton].notNil) {
+		{
+			~granV21[\playButton].value_(0);
+			~granV21[\playButton].refresh;
+			if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+		}.defer;
 	};
+};
 
 	~granV21[\applyXYTarget] = { |target, value|
 	var p = ~granV21[\params];
@@ -607,6 +640,8 @@ xyYTarget: \aJitter
 
 		if(~granV21[\menus][\oscWave].notNil) { ~granV21[\menus][\oscWave].value = p[\oscWave] };
 
+		~granV21[\playButton] = nil;
+
 		if(~granV21[\pathLabel].notNil) {
 	~granV21[\pathLabel].string_(~granV21[\samplePath]);
 };
@@ -616,69 +651,12 @@ xyYTarget: \aJitter
 
 
 	~granV21[\spawnVisualDots] = { |which|
-	var p = ~granV21[\params];
-	var dots, density, jitter, scanRate, scanWidth, regStart, regEnd, regLen, basePos, count;
-
-	if((~granV21[\voices].size <= 0) and: { ~granV21[\isPreviewing].not }) {
-		^nil;
-	};
-
-	regStart = p[\regionStart];
-	regEnd = p[\regionEnd];
-	regLen = (regEnd - regStart).max(0.001);
-	basePos = p[\position].clip(0, 1);
-
-	if(which == \a) {
-		dots = ~granV21[\grainDotsA];
-		density = p[\aDensity];
-		jitter = p[\aJitter];
-		scanRate = p[\aScanRate];
-		scanWidth = p[\aScanWidth];
-	} {
-		dots = ~granV21[\grainDotsB];
-		density = p[\bDensity];
-		jitter = p[\bJitter];
-		scanRate = p[\bScanRate];
-		scanWidth = p[\bScanWidth];
-	};
-
-	count = (density * 0.06).clip(1, 10).asInteger;
-
-	count.do {
-		var scan, posNorm, xNorm, yNorm, ttl, size;
-
-		scan = sin(~granV21[\visTime] * scanRate * 2pi) * scanWidth;
-		posNorm = (basePos + scan + rrand(0 - jitter, jitter)).clip(0, 1);
-		xNorm = (regStart + (posNorm * regLen)).clip(0, 1);
-
-		yNorm = if(which == \a) {
-			rrand(0.18, 0.42)
-		} {
-			rrand(0.58, 0.82)
-		};
-
-		ttl = rrand(0.10, 0.28);
-		size = rrand(4.0, 8.0);
-
-		dots.add((
-			x: xNorm,
-			y: yNorm,
-			ttl: ttl,
-			size: size
-		));
-	};
+	nil
 };
 
 ~granV21[\decayVisualDots] = {
-	~granV21[\grainDotsA] = ~granV21[\grainDotsA].collect { |d|
-		d.put(\ttl, d[\ttl] - 0.05);
-		d
-	}.select { |d| d[\ttl] > 0 };
-
-	~granV21[\grainDotsB] = ~granV21[\grainDotsB].collect { |d|
-		d.put(\ttl, d[\ttl] - 0.05);
-		d
-	}.select { |d| d[\ttl] > 0 };
+	~granV21[\grainDotsA].clear;
+	~granV21[\grainDotsB].clear;
 };
 
 ~granV21[\startVisualizer] = {
@@ -798,15 +776,15 @@ xyYTarget: \aJitter
 		.states_([["Stop Rec"]])
 		.action_({ ~granV21[\stopRecording].value });
 
-	Button(~granV21[\win], Rect(521, 14, 80, 28))
+	~granV21[\playButton] = Button(~granV21[\win], Rect(521, 14, 80, 28))
 	.states_([["Play"], ["Stop"]])
-		.action_({ |bt|
-			if(bt.value == 1) {
-				~granV21[\previewOn].value;
-			} {
-				~granV21[\previewOff].value;
-			};
-		});
+	.action_({ |bt|
+		if(bt.value == 1) {
+			~granV21[\previewOn].value;
+		} {
+			~granV21[\previewOff].value;
+		};
+	});
 
 	Button(~granV21[\win], Rect(607, 14, 75, 28))
 		.states_([["Panic"]])
@@ -823,68 +801,154 @@ xyYTarget: \aJitter
 	~granV21[\waveView] = UserView(~granV21[\win], Rect(16, 56, 1088, 220))
 		.background_(Color.white);
 
+
 	~granV21[\waveView].drawFunc_({
-		var data = ~granV21[\waveData];
-		var p = ~granV21[\params];
-		var b = ~granV21[\waveView].bounds;
-		var w = b.width;
-		var h = b.height;
-		var mid = h * 0.5;
-		var x1 = p[\regionStart] * w;
-		var x2 = p[\regionEnd] * w;
-		var xpos = (p[\regionStart] + (p[\position] * (p[\regionEnd] - p[\regionStart]))) * w;
+	var data = ~granV21[\waveData];
+	var p = ~granV21[\params];
+	var v = ~granV21[\view];
+	var b = ~granV21[\waveView].bounds;
+	var w = b.width;
+	var h = b.height;
+	var mid = h * 0.5;
 
-		Pen.fillColor = Color.white;
-		Pen.fillRect(Rect(0, 0, w, h));
+	var zoom = (v[\zoom] ? 1.0).clip(1.0, 64.0);
+	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
+	var maxScroll = (1.0 - visibleFrac).max(0.0);
+	var scroll = (v[\scroll] ? 0.0).clip(0.0, 1.0) * maxScroll;
+	var visStart = scroll;
+	var visEnd = (scroll + visibleFrac).clip(0.0, 1.0);
 
-		Pen.color = Color.gray(0.75);
-		Pen.moveTo(Point(0, mid));
-		Pen.lineTo(Point(w, mid));
-		Pen.stroke;
+	var xFromNorm, x1, x2, xpos, lx1, lx2;
+	var startIndex, endIndex, visibleData;
 
-		if(data.notNil and: { data.size > 1 }) {
-	Pen.fillColor = Color(0.0, 0.45, 0.35);
-
-	data.do { |val, i|
-		var x = i.linlin(0, data.size - 1, 0, w);
-		var amp = (val.clip(0, 1).max(0.01)) * h * 0.42;
-
-		Pen.fillRect(Rect(x, mid - amp, 1.0, amp * 2));
+	xFromNorm = { |norm|
+		((norm - visStart) / visibleFrac * w).clip(0, w);
 	};
-};
 
+	Pen.fillColor = Color.white;
+	Pen.fillRect(Rect(0, 0, w, h));
+
+	Pen.color = Color.gray(0.75);
+	Pen.moveTo(Point(0, mid));
+	Pen.lineTo(Point(w, mid));
+	Pen.stroke;
+
+	if(data.notNil and: { data.size > 1 }) {
+		startIndex = (visStart * (data.size - 1)).floor.asInteger.clip(0, data.size - 1);
+		endIndex = (visEnd * (data.size - 1)).ceil.asInteger.clip(startIndex + 1, data.size - 1);
+		visibleData = data.copyRange(startIndex, endIndex);
+
+		if(visibleData.notNil and: { visibleData.size > 1 }) {
+			Pen.fillColor = Color(0.0, 0.45, 0.35);
+
+			visibleData.do { |val, i|
+				var normInView = i / (visibleData.size - 1).max(1);
+				var x = normInView * w;
+				var amp = (val.clip(0, 1).max(0.01)) * h * 0.42;
+
+				Pen.fillRect(Rect(x, mid - amp, 1.0, amp * 2));
+			};
+		};
+	};
+
+	x1 = xFromNorm.value(p[\regionStart]);
+	x2 = xFromNorm.value(p[\regionEnd]);
+	xpos = xFromNorm.value(
+		p[\regionStart] + (p[\position] * (p[\regionEnd] - p[\regionStart]))
+	);
+
+	lx1 = xFromNorm.value(v[\loopStart] ? 0.0);
+	lx2 = xFromNorm.value(v[\loopEnd] ? 1.0);
+
+	// region highlight only if visible
+	if((p[\regionEnd] > visStart) and: { p[\regionStart] < visEnd }) {
 		Pen.fillColor = Color.yellow.alpha_(0.14);
 		Pen.fillRect(Rect(x1, 0, (x2 - x1).max(1), h));
+	};
 
-		Pen.color = Color(0.8, 0.65, 0.0);
+	// region edges
+	Pen.color = Color(0.8, 0.65, 0.0);
+	if((p[\regionStart] >= visStart) and: { p[\regionStart] <= visEnd }) {
 		Pen.moveTo(Point(x1, 0)); Pen.lineTo(Point(x1, h)); Pen.stroke;
+	};
+	if((p[\regionEnd] >= visStart) and: { p[\regionEnd] <= visEnd }) {
 		Pen.moveTo(Point(x2, 0)); Pen.lineTo(Point(x2, h)); Pen.stroke;
+	};
 
-		Pen.color = Color.red(0.85, 0.25);
-Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
+	// play position
+	Pen.color = Color.red(0.85, 0.25);
+	if((xpos >= 0) and: { xpos <= w }) {
+		Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
+	};
 
-// visual grain dots for A
-~granV21[\grainDotsA].do { |d|
-	var px = d[\x] * w;
-	var py = d[\y] * h;
-	var sz = d[\size];
-	var alpha = d[\ttl].linlin(0, 0.28, 0.0, 0.85).clip(0, 0.85);
+	// loop markers
+	Pen.color = Color.blue(0.3, 0.55);
+	if(((v[\loopStart] ? 0.0) >= visStart) and: { (v[\loopStart] ? 0.0) <= visEnd }) {
+		Pen.moveTo(Point(lx1, 0)); Pen.lineTo(Point(lx1, h)); Pen.stroke;
+	};
+	if(((v[\loopEnd] ? 1.0) >= visStart) and: { (v[\loopEnd] ? 1.0) <= visEnd }) {
+		Pen.moveTo(Point(lx2, 0)); Pen.lineTo(Point(lx2, h)); Pen.stroke;
+	};
 
-	Pen.fillColor = Color.cyan.alpha_(alpha);
-	Pen.fillOval(Rect.aboutPoint(Point(px, py), sz, sz));
+if((~granV21[\voices].size > 0) or: { ~granV21[\isPreviewing] }) {
+	var regStart = p[\regionStart];
+	var regEnd = p[\regionEnd];
+	var regLen = (regEnd - regStart).max(0.001);
+	var basePos = p[\position].clip(0, 1);
+
+	var aScan, bScan, aPosNorm, bPosNorm, aX, bX;
+	var trailCount = 6;
+
+	aScan = sin(~granV21[\visTime] * p[\aScanRate].max(0.001) * 2pi) * p[\aScanWidth].clip(0, 1);
+	bScan = sin(~granV21[\visTime] * p[\bScanRate].max(0.001) * 2pi) * p[\bScanWidth].clip(0, 1);
+
+	aPosNorm = (basePos + aScan).clip(0, 1);
+	bPosNorm = (basePos + bScan).clip(0, 1);
+
+	aX = (regStart + (aPosNorm * regLen)) * w;
+	bX = (regStart + (bPosNorm * regLen)) * w;
+
+	// Gran A trail
+	trailCount.do { |i|
+		var t = (i + 1) / trailCount;
+		var xTrail = aX - (t * 18);
+		var alpha = (1 - t) * 0.35;
+
+		Pen.color = Color.cyan.alpha_(alpha);
+		Pen.moveTo(Point(xTrail, h * 0.18));
+		Pen.lineTo(Point(xTrail, h * 0.82));
+		Pen.stroke;
+	};
+
+	// Gran B trail
+	trailCount.do { |i|
+		var t = (i + 1) / trailCount;
+		var xTrail = bX - (t * 18);
+		var alpha = (1 - t) * 0.35;
+
+		Pen.color = Color.magenta.alpha_(alpha);
+		Pen.moveTo(Point(xTrail, h * 0.22));
+		Pen.lineTo(Point(xTrail, h * 0.78));
+		Pen.stroke;
+	};
+
+	// Gran A playhead
+	Pen.color = Color.cyan.alpha_(0.95);
+	Pen.moveTo(Point(aX, h * 0.08));
+	Pen.lineTo(Point(aX, h * 0.92));
+	Pen.stroke;
+
+	// Gran B playhead
+	Pen.color = Color.magenta.alpha_(0.95);
+	Pen.moveTo(Point(bX, h * 0.12));
+	Pen.lineTo(Point(bX, h * 0.88));
+	Pen.stroke;
 };
 
-// visual grain dots for B
-~granV21[\grainDotsB].do { |d|
-	var px = d[\x] * w;
-	var py = d[\y] * h;
-	var sz = d[\size];
-	var alpha = d[\ttl].linlin(0, 0.28, 0.0, 0.75).clip(0, 0.75);
 
-	Pen.fillColor = Color.magenta.alpha_(alpha);
-	Pen.fillOval(Rect.aboutPoint(Point(px, py), sz, sz));
-};
-	});
+
+});
+
 
 	~granV21[\waveView].mouseDownAction_({ |view, x, y, modifiers, buttonNumber, clickCount|
 		var p = ~granV21[\params];
@@ -938,6 +1002,10 @@ Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
 		~granV21[\dragMode] = \none;
 	});
 
+
+
+
+
 	// tabs
 	["Sample", "Gran A", "Gran B", "Osc/FX", "Perform"].do { |name, i|
 		var bt = Button(~granV21[\win], Rect(16 + (i * 118), 292, 108, 26))
@@ -955,12 +1023,36 @@ Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
 		StaticText(page, Rect(12, 10, 380, 20)).string_("Sample / Region / Envelope / Recording");
 		StaticText(page, Rect(12, 38, 750, 18)).string_("Drag yellow edges = region. Drag red line = position. Double-click waveform = reset region.");
 
-		~granV21[\makeSliderRow].value(page, 78,  "Master",  \masterAmp, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 108, "Attack",  \atk, 0.001, 2, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 138, "Release", \rel, 0.001, 4, \exp, 3);
+		StaticText(page, Rect(12, 68, 42, 18)).string_("Zoom");
+Slider(page, Rect(58, 70, 180, 16))
+	.value_(0.0)
+	.action_({ |sl|
+		~granV21[\view][\zoom] = sl.value.linexp(0, 1, 1, 32);
+		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+	});
 
-		StaticText(page, Rect(12, 185, 190, 20)).string_("Live Buffer Length (sec)");
-		NumberBox(page, Rect(205, 185, 90, 20))
+StaticText(page, Rect(255, 68, 42, 18)).string_("Scroll");
+Slider(page, Rect(305, 70, 180, 16))
+	.value_(0.0)
+	.action_({ |sl|
+		~granV21[\view][\scroll] = sl.value.clip(0, 1);
+		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+	});
+
+StaticText(page, Rect(505, 68, 68, 18)).string_("Edit Mode");
+PopUpMenu(page, Rect(575, 66, 120, 20))
+	.items_(["region", "loop", "scroll"])
+	.value_(0)
+	.action_({ |pm|
+		~granV21[\view][\editMode] = [\region, \loop, \scroll][pm.value];
+	});
+
+		~granV21[\makeSliderRow].value(page, 108, "Master",  \masterAmp, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 138, "Attack",  \atk, 0.001, 2, \exp, 3);
+~granV21[\makeSliderRow].value(page, 168, "Release", \rel, 0.001, 4, \exp, 3);
+
+StaticText(page, Rect(12, 215, 190, 20)).string_("Live Buffer Length (sec)");
+NumberBox(page, Rect(205, 215, 90, 20))
 			.value_(~granV21[\recordSeconds])
 			.decimals_(2)
 			.action_({ |nb|
@@ -968,7 +1060,7 @@ Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
 				~granV21[\allocLiveBuf].value;
 			});
 
-		StaticText(page, Rect(12, 230, 900, 120))
+		StaticText(page, Rect(12, 260, 900, 120))
 			.string_(
 				"Version 2.1 notes:\n"
 				++ "• MIDI note-on creates a new voice.\n"
