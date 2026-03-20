@@ -44,6 +44,8 @@ s.waitForBoot({
 	~granV21[\menus] = IdentityDictionary.new;
 	~granV21[\recordSeconds] = 8.0;
 	~granV21[\dragMode] = \none;
+	~granV21[\dragTarget] = \none;
+~granV21[\playheadHitRadius] = 50;   // pixels
 	~granV21[\isRecording] = false;
 	~granV21[\isPreviewing] = false;
 	~granV21[\previewNote] = 60;
@@ -66,8 +68,9 @@ s.waitForBoot({
 		glide: 0.03,
 
 		regionStart: 0.0,
-		regionEnd: 1.0,
-		position: 0.5,
+regionEnd: 1.0,
+aPosition: 0.5,
+bPosition: 0.5,
 
 		aOn: 1,
 		aAmp: 0.9,
@@ -116,7 +119,7 @@ xyYTarget: \aJitter
 	SynthDef(\granVoiceV21, {
 		|out=0, bufnum=0, gate=1,
 		masterAmp=0.35, pitchRatio=1.0, glide=0.03,
-		regionStart=0.0, regionEnd=1.0, position=0.5,
+		regionStart=0.0, regionEnd=1.0, position=0.5, aPosition=0.5, bPosition=0.5,
 
 		aOn=1, aAmp=0.9, aDensity=18, aDur=0.11, aJitter=0.04, aRateMul=1.0, aRateRand=0.05, aScanRate=0.08, aScanWidth=0.08, aPanWidth=0.55,
 		bOn=1, bAmp=0.65, bDensity=8, bDur=0.20, bJitter=0.08, bRateMul=0.5, bRateRand=0.04, bScanRate=0.03, bScanWidth=0.15, bPanWidth=0.8,
@@ -124,7 +127,7 @@ xyYTarget: \aJitter
 		oscOn=0, oscAmp=0.18, oscWave=0, oscDetune=0.0, oscCutoff=8000, oscRes=0.15,
 		hpf=20, lpf=18000, atk=0.01, rel=0.35|
 
-		var env, bufDur, regStartSec, regEndSec, regLen, basePosNorm;
+		var env, bufDur, regStartSec, regEndSec, regLen, aBasePosNorm, bBasePosNorm;
 		var trigA, trigB, posA, posB, rateA, rateB, panA, panB, sigA, sigB;
 		var freq, osc, sig, scanA, scanB, ratioLag;
 
@@ -136,12 +139,14 @@ xyYTarget: \aJitter
 		regLen = (regEndSec - regStartSec).max(0.001);
 
 		ratioLag = Lag.kr(pitchRatio, glide.max(0.001));
-		basePosNorm = position.clip(0, 1);
+
+aBasePosNorm = aPosition.clip(0, 1);
+bBasePosNorm = bPosition.clip(0, 1);
 
 		// ---------------- Gran A ----------------
 				trigA = Dust.kr(aDensity.max(0.1));
 		scanA = SinOsc.kr(aScanRate.max(0.001), 0, aScanWidth.clip(0, 1));
-		posA = (basePosNorm + scanA + TRand.kr(0 - aJitter.clip(0,1), aJitter.clip(0,1), trigA)).clip(0, 1);
+		posA = (aBasePosNorm + scanA + TRand.kr(0 - aJitter.clip(0,1), aJitter.clip(0,1), trigA)).clip(0, 1);
 		rateA = (ratioLag * aRateMul) + TRand.kr(0 - aRateRand, aRateRand, trigA);
 		panA = TRand.kr(0 - aPanWidth.clip(0,1), aPanWidth.clip(0,1), trigA);
 
@@ -159,7 +164,7 @@ xyYTarget: \aJitter
 		// ---------------- Gran B ----------------
 				trigB = Dust.kr(bDensity.max(0.1));
 		scanB = SinOsc.kr(bScanRate.max(0.001), 0, bScanWidth.clip(0, 1));
-		posB = (basePosNorm + scanB + TRand.kr(0 - bJitter.clip(0,1), bJitter.clip(0,1), trigB)).clip(0, 1);
+		posB = (bBasePosNorm + scanB + TRand.kr(0 - bJitter.clip(0,1), bJitter.clip(0,1), trigB)).clip(0, 1);
 		rateB = (ratioLag * bRateMul) + TRand.kr(0 - bRateRand, bRateRand, trigB);
 		panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 
@@ -226,7 +231,8 @@ xyYTarget: \aJitter
 
 			\regionStart, p[\regionStart],
 			\regionEnd, p[\regionEnd],
-			\position, p[\position],
+			\aPosition, p[\aPosition],
+			\bPosition, p[\bPosition],
 
 			\aOn, p[\aOn], \aAmp, p[\aAmp], \aDensity, p[\aDensity], \aDur, p[\aDur],
 			\aJitter, p[\aJitter], \aRateMul, p[\aRateMul], \aRateRand, p[\aRateRand],
@@ -310,8 +316,9 @@ xyYTarget: \aJitter
 	~granV21[\sampleBuf] = buf;
 	~granV21[\samplePath] = label ? "Untitled";
 	~granV21[\params][\regionStart] = 0.0;
-	~granV21[\params][\regionEnd] = 1.0;
-	~granV21[\params][\position] = 0.5;
+~granV21[\params][\regionEnd] = 1.0;
+~granV21[\params][\aPosition] = 0.5;
+~granV21[\params][\bPosition] = 0.5;
 
 		~granV21[\view][\loopStart] = 0.0;
 		~granV21[\view][\loopEnd] = 1.0;
@@ -502,9 +509,10 @@ xyYTarget: \aJitter
 	var p = ~granV21[\params];
 
 	switch(target,
-		\position,   { p[\position] = value.clip(0, 1) },
-		\regionStart,{ p[\regionStart] = value.clip(0, p[\regionEnd] - 0.01) },
-		\regionEnd,  { p[\regionEnd] = value.clip(p[\regionStart] + 0.01, 1.0) },
+	\aPosition,  { p[\aPosition] = value.clip(0, 1) },
+	\bPosition,  { p[\bPosition] = value.clip(0, 1) },
+	\regionStart,{ p[\regionStart] = value.clip(0, p[\regionEnd] - 0.01) },
+	\regionEnd,  { p[\regionEnd] = value.clip(p[\regionStart] + 0.01, 1.0) },
 		\aJitter,    { p[\aJitter] = value.clip(0, 1) },
 		\bJitter,    { p[\bJitter] = value.clip(0, 1) },
 		\aDensity,   { p[\aDensity] = value.linexp(0, 1, 0.5, 80) },
@@ -597,6 +605,51 @@ xyYTarget: \aJitter
 		};
 	};
 
+
+	~granV21[\getWaveMetrics] = { |view|
+	var p = ~granV21[\params];
+	var vw = ~granV21[\view];
+	var w = view.bounds.width;
+	var h = view.bounds.height;
+
+	var zoom = (vw[\zoom] ? 1.0).clip(1.0, 64.0);
+	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
+	var maxScroll = (1.0 - visibleFrac).max(0.0);
+	var scroll = (vw[\scroll] ? 0.0).clip(0.0, 1.0) * maxScroll;
+	var visStart = scroll;
+	var visEnd = (scroll + visibleFrac).clip(0.0, 1.0);
+
+	var regStart = p[\regionStart];
+	var regEnd = p[\regionEnd];
+	var regLen = (regEnd - regStart).max(0.001);
+
+	var aAbsNorm = (regStart + (p[\aPosition].clip(0, 1) * regLen)).clip(0, 1);
+	var bAbsNorm = (regStart + (p[\bPosition].clip(0, 1) * regLen)).clip(0, 1);
+
+	var xFromNorm = { |n|
+		((n - visStart) / visibleFrac * w).clip(0, w);
+	};
+
+	(
+		w: w,
+		h: h,
+		visStart: visStart,
+		visEnd: visEnd,
+		visibleFrac: visibleFrac,
+		regStart: regStart,
+		regEnd: regEnd,
+		regLen: regLen,
+		aAbsNorm: aAbsNorm,
+		bAbsNorm: bAbsNorm,
+		aX: xFromNorm.value(aAbsNorm),
+		bX: xFromNorm.value(bAbsNorm),
+		startX: xFromNorm.value(regStart),
+		endX: xFromNorm.value(regEnd),
+		xFromNorm: xFromNorm
+	)
+};
+
+
 	~granV21[\syncControls] = {
 		var p = ~granV21[\params];
 
@@ -606,8 +659,9 @@ xyYTarget: \aJitter
 			[\rel, 0.001, 4, \exp],
 
 			[\aAmp, 0, 1, \lin],
-			[\aDensity, 0.5, 80, \exp],
-			[\aDur, 0.005, 1.0, \exp],
+[\aPosition, 0, 1, \lin],
+[\aDensity, 0.5, 80, \exp],
+[\aDur, 0.005, 1.0, \exp],
 			[\aJitter, 0, 1, \lin],
 			[\aRateMul, -2, 2, \lin],
 			[\aRateRand, 0, 1, \lin],
@@ -615,8 +669,9 @@ xyYTarget: \aJitter
 			[\aScanWidth, 0, 1, \lin],
 
 			[\bAmp, 0, 1, \lin],
-			[\bDensity, 0.5, 80, \exp],
-			[\bDur, 0.005, 1.0, \exp],
+[\bPosition, 0, 1, \lin],
+[\bDensity, 0.5, 80, \exp],
+[\bDur, 0.005, 1.0, \exp],
 			[\bJitter, 0, 1, \lin],
 			[\bRateMul, -2, 2, \lin],
 			[\bRateRand, 0, 1, \lin],
@@ -852,13 +907,10 @@ xyYTarget: \aJitter
 	};
 
 	x1 = xFromNorm.value(p[\regionStart]);
-	x2 = xFromNorm.value(p[\regionEnd]);
-	xpos = xFromNorm.value(
-		p[\regionStart] + (p[\position] * (p[\regionEnd] - p[\regionStart]))
-	);
+x2 = xFromNorm.value(p[\regionEnd]);
 
-	lx1 = xFromNorm.value(v[\loopStart] ? 0.0);
-	lx2 = xFromNorm.value(v[\loopEnd] ? 1.0);
+lx1 = xFromNorm.value(v[\loopStart] ? 0.0);
+lx2 = xFromNorm.value(v[\loopEnd] ? 1.0);
 
 	// region highlight only if visible
 	if((p[\regionEnd] > visStart) and: { p[\regionStart] < visEnd }) {
@@ -875,11 +927,7 @@ xyYTarget: \aJitter
 		Pen.moveTo(Point(x2, 0)); Pen.lineTo(Point(x2, h)); Pen.stroke;
 	};
 
-	// play position
-	Pen.color = Color.red(0.85, 0.25);
-	if((xpos >= 0) and: { xpos <= w }) {
-		Pen.moveTo(Point(xpos, 0)); Pen.lineTo(Point(xpos, h)); Pen.stroke;
-	};
+
 
 	// loop markers
 	Pen.color = Color.blue(0.3, 0.55);
@@ -890,59 +938,42 @@ xyYTarget: \aJitter
 		Pen.moveTo(Point(lx2, 0)); Pen.lineTo(Point(lx2, h)); Pen.stroke;
 	};
 
-if((~granV21[\voices].size > 0) or: { ~granV21[\isPreviewing] }) {
+if(~granV21[\buf].notNil) {
 	var regStart = p[\regionStart];
 	var regEnd = p[\regionEnd];
 	var regLen = (regEnd - regStart).max(0.001);
-	var basePos = p[\position].clip(0, 1);
+	var aBasePos = p[\aPosition].clip(0, 1);
+	var bBasePos = p[\bPosition].clip(0, 1);
 
-	var aScan, bScan, aPosNorm, bPosNorm, aX, bX;
+	var aScan, bScan, aPosNorm, bPosNorm;
+	var aAbsNorm, bAbsNorm, aX, bX;
 	var trailCount = 6;
 
 	aScan = sin(~granV21[\visTime] * p[\aScanRate].max(0.001) * 2pi) * p[\aScanWidth].clip(0, 1);
 	bScan = sin(~granV21[\visTime] * p[\bScanRate].max(0.001) * 2pi) * p[\bScanWidth].clip(0, 1);
 
-	aPosNorm = (basePos + aScan).clip(0, 1);
-	bPosNorm = (basePos + bScan).clip(0, 1);
+	aPosNorm = (aBasePos + aScan).clip(0, 1);
+	bPosNorm = (bBasePos + bScan).clip(0, 1);
 
-	aX = (regStart + (aPosNorm * regLen)) * w;
-	bX = (regStart + (bPosNorm * regLen)) * w;
+	aAbsNorm = (regStart + (aPosNorm * regLen)).clip(0, 1);
+	bAbsNorm = (regStart + (bPosNorm * regLen)).clip(0, 1);
 
-	// Gran A trail
-	trailCount.do { |i|
-		var t = (i + 1) / trailCount;
-		var xTrail = aX - (t * 18);
-		var alpha = (1 - t) * 0.35;
+	aX = xFromNorm.value(aAbsNorm);
+	bX = xFromNorm.value(bAbsNorm);
 
-		Pen.color = Color.cyan.alpha_(alpha);
-		Pen.moveTo(Point(xTrail, h * 0.18));
-		Pen.lineTo(Point(xTrail, h * 0.82));
+	if((aAbsNorm >= visStart) and: { aAbsNorm <= visEnd }) {
+		Pen.color = Color.cyan.alpha_(0.95);
+		Pen.moveTo(Point(aX, h * 0.08));
+		Pen.lineTo(Point(aX, h * 0.92));
 		Pen.stroke;
 	};
 
-	// Gran B trail
-	trailCount.do { |i|
-		var t = (i + 1) / trailCount;
-		var xTrail = bX - (t * 18);
-		var alpha = (1 - t) * 0.35;
-
-		Pen.color = Color.magenta.alpha_(alpha);
-		Pen.moveTo(Point(xTrail, h * 0.22));
-		Pen.lineTo(Point(xTrail, h * 0.78));
+	if((bAbsNorm >= visStart) and: { bAbsNorm <= visEnd }) {
+		Pen.color = Color.magenta.alpha_(0.95);
+		Pen.moveTo(Point(bX, h * 0.12));
+		Pen.lineTo(Point(bX, h * 0.88));
 		Pen.stroke;
 	};
-
-	// Gran A playhead
-	Pen.color = Color.cyan.alpha_(0.95);
-	Pen.moveTo(Point(aX, h * 0.08));
-	Pen.lineTo(Point(aX, h * 0.92));
-	Pen.stroke;
-
-	// Gran B playhead
-	Pen.color = Color.magenta.alpha_(0.95);
-	Pen.moveTo(Point(bX, h * 0.12));
-	Pen.lineTo(Point(bX, h * 0.88));
-	Pen.stroke;
 };
 
 
@@ -950,57 +981,96 @@ if((~granV21[\voices].size > 0) or: { ~granV21[\isPreviewing] }) {
 });
 
 
-	~granV21[\waveView].mouseDownAction_({ |view, x, y, modifiers, buttonNumber, clickCount|
-		var p = ~granV21[\params];
-		var norm = (x / view.bounds.width).clip(0, 1);
+~granV21[\waveView].mouseDownAction_({ |view, x, y, modifiers, buttonNumber, clickCount|
+	var p = ~granV21[\params];
+	var m = ~granV21[\getWaveMetrics].value(view);
+	var normVisible = (x / m[\w]).clip(0, 1);
+	var norm = (m[\visStart] + (normVisible * m[\visibleFrac])).clip(0, 1);
 
-		if(clickCount >= 2) {
-			p[\regionStart] = 0.0;
-			p[\regionEnd] = 1.0;
-			p[\position] = 0.5;
-			~granV21[\dragMode] = \none;
-			~granV21[\updateAllVoices].value;
+	var aDistPx = (x - m[\aX]).abs;
+	var bDistPx = (x - m[\bX]).abs;
+	var startDistPx = (x - m[\startX]).abs;
+	var endDistPx = (x - m[\endX]).abs;
+
+	var playheadHitRadius = ~granV21[\playheadHitRadius] ? 24;
+	var edgeHitPx = 12;
+
+	if(clickCount >= 2) {
+		p[\regionStart] = 0.0;
+		p[\regionEnd] = 1.0;
+		p[\aPosition] = 0.5;
+		p[\bPosition] = 0.5;
+		~granV21[\dragMode] = \none;
+		~granV21[\dragTarget] = \none;
+		~granV21[\updateAllVoices].value;
+		{
 			view.refresh;
-			^nil;
-		};
+			if(~granV21[\win].notNil) { ~granV21[\win].refresh };
+		}.defer;
+		^nil;
+	};
 
-		if((norm - p[\regionStart]).abs < 0.02) {
-			~granV21[\dragMode] = \regionStart;
+	// First priority: whichever playhead is closest, if within radius
+	if((aDistPx <= playheadHitRadius) or: { bDistPx <= playheadHitRadius }) {
+		if(aDistPx <= bDistPx) {
+			~granV21[\dragMode] = \aPosition;
+			~granV21[\dragTarget] = \aPosition;
 		} {
-			if((norm - p[\regionEnd]).abs < 0.02) {
+			~granV21[\dragMode] = \bPosition;
+			~granV21[\dragTarget] = \bPosition;
+		};
+	} {
+		if(startDistPx <= edgeHitPx) {
+			~granV21[\dragMode] = \regionStart;
+			~granV21[\dragTarget] = \regionStart;
+		} {
+			if(endDistPx <= edgeHitPx) {
 				~granV21[\dragMode] = \regionEnd;
+				~granV21[\dragTarget] = \regionEnd;
 			} {
-				~granV21[\dragMode] = \position;
-				p[\position] = ((norm - p[\regionStart]) / (p[\regionEnd] - p[\regionStart]).max(0.001)).clip(0, 1);
-				~granV21[\updateAllVoices].value;
+				~granV21[\dragMode] = \none;
+				~granV21[\dragTarget] = \none;
 			};
 		};
+	};
 
-		view.refresh;
-	});
+	view.refresh;
+});
+
 
 	~granV21[\waveView].mouseMoveAction_({ |view, x, y|
-		var p = ~granV21[\params];
-		var norm = (x / view.bounds.width).clip(0, 1);
+	var p = ~granV21[\params];
+	var m = ~granV21[\getWaveMetrics].value(view);
+	var normVisible = (x / m[\w]).clip(0, 1);
+	var norm = (m[\visStart] + (normVisible * m[\visibleFrac])).clip(0, 1);
 
-		switch(~granV21[\dragMode],
-			\regionStart, {
-				p[\regionStart] = norm.clip(0, p[\regionEnd] - 0.01);
-			},
-			\regionEnd, {
-				p[\regionEnd] = norm.clip(p[\regionStart] + 0.01, 1.0);
-			},
-			\position, {
-				p[\position] = ((norm - p[\regionStart]) / (p[\regionEnd] - p[\regionStart]).max(0.001)).clip(0, 1);
-			}
-		);
+	switch(~granV21[\dragTarget],
 
-		~granV21[\updateAllVoices].value;
-	});
+		\regionStart, {
+			p[\regionStart] = norm.clip(0, p[\regionEnd] - 0.01);
+		},
 
-	~granV21[\waveView].mouseUpAction_({
-		~granV21[\dragMode] = \none;
-	});
+		\regionEnd, {
+			p[\regionEnd] = norm.clip(p[\regionStart] + 0.01, 1.0);
+		},
+
+		\aPosition, {
+			p[\aPosition] = ((norm - p[\regionStart]) / (p[\regionEnd] - p[\regionStart]).max(0.001)).clip(0, 1);
+		},
+
+		\bPosition, {
+			p[\bPosition] = ((norm - p[\regionStart]) / (p[\regionEnd] - p[\regionStart]).max(0.001)).clip(0, 1);
+		}
+	);
+
+	~granV21[\updateAllVoices].value;
+	view.refresh;
+});
+
+~granV21[\waveView].mouseUpAction_({
+	~granV21[\dragMode] = \none;
+	~granV21[\dragTarget] = \none;
+});
 
 
 
@@ -1021,7 +1091,7 @@ if((~granV21[\voices].size > 0) or: { ~granV21[\isPreviewing] }) {
 			.background_(Color.white);
 
 		StaticText(page, Rect(12, 10, 380, 20)).string_("Sample / Region / Envelope / Recording");
-		StaticText(page, Rect(12, 38, 750, 18)).string_("Drag yellow edges = region. Drag red line = position. Double-click waveform = reset region.");
+		StaticText(page, Rect(12, 38, 900, 18)).string_("Drag yellow edges = region. Drag cyan/magenta lines = Gran A / Gran B positions. Double-click waveform = reset region + engine positions.");
 
 		StaticText(page, Rect(12, 68, 42, 18)).string_("Zoom");
 Slider(page, Rect(58, 70, 180, 16))
@@ -1081,13 +1151,14 @@ NumberBox(page, Rect(205, 215, 90, 20))
 		StaticText(page, Rect(12, 10, 250, 20)).string_("Granulator A");
 		~granV21[\makeToggleRow].value(page, 45, "A On", \aOn);
 		~granV21[\makeSliderRow].value(page, 75,  "A Amp", \aAmp, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 105, "Density", \aDensity, 0.5, 80, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 135, "Dur", \aDur, 0.005, 1.0, \exp, 4);
-		~granV21[\makeSliderRow].value(page, 165, "Jitter", \aJitter, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 195, "RateMul", \aRateMul, -2, 2, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 225, "RateRand", \aRateRand, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 255, "ScanRate", \aScanRate, 0.001, 6, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 285, "ScanWidth", \aScanWidth, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 105, "A Pos", \aPosition, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 135, "Density", \aDensity, 0.5, 80, \exp, 3);
+~granV21[\makeSliderRow].value(page, 165, "Dur", \aDur, 0.005, 1.0, \exp, 4);
+~granV21[\makeSliderRow].value(page, 195, "Jitter", \aJitter, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 225, "RateMul", \aRateMul, -2, 2, \lin, 3);
+~granV21[\makeSliderRow].value(page, 255, "RateRand", \aRateRand, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 285, "ScanRate", \aScanRate, 0.001, 6, \exp, 3);
+~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \aScanWidth, 0, 1, \lin, 3);
 
 		~granV21[\pages].add(page);
 	}.value;
@@ -1100,13 +1171,14 @@ NumberBox(page, Rect(205, 215, 90, 20))
 		StaticText(page, Rect(12, 10, 250, 20)).string_("Granulator B");
 		~granV21[\makeToggleRow].value(page, 45, "B On", \bOn);
 		~granV21[\makeSliderRow].value(page, 75,  "B Amp", \bAmp, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 105, "Density", \bDensity, 0.5, 80, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 135, "Dur", \bDur, 0.005, 1.0, \exp, 4);
-		~granV21[\makeSliderRow].value(page, 165, "Jitter", \bJitter, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 195, "RateMul", \bRateMul, -2, 2, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 225, "RateRand", \bRateRand, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 255, "ScanRate", \bScanRate, 0.001, 6, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 285, "ScanWidth", \bScanWidth, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 105, "B Pos", \bPosition, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 135, "Density", \bDensity, 0.5, 80, \exp, 3);
+~granV21[\makeSliderRow].value(page, 165, "Dur", \bDur, 0.005, 1.0, \exp, 4);
+~granV21[\makeSliderRow].value(page, 195, "Jitter", \bJitter, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 225, "RateMul", \bRateMul, -2, 2, \lin, 3);
+~granV21[\makeSliderRow].value(page, 255, "RateRand", \bRateRand, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 285, "ScanRate", \bScanRate, 0.001, 6, \exp, 3);
+~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \bScanWidth, 0, 1, \lin, 3);
 
 		~granV21[\pages].add(page);
 	}.value;
@@ -1142,7 +1214,8 @@ NumberBox(page, Rect(205, 215, 90, 20))
 		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
 			.background_(Color.white);
 var targets = [
-	[\position, "position"],
+	[\aPosition, "aPosition"],
+	[\bPosition, "bPosition"],
 	[\regionStart, "regionStart"],
 	[\regionEnd, "regionEnd"],
 	[\aJitter, "aJitter"],
@@ -1158,6 +1231,7 @@ var targets = [
 	[\oscCutoff, "oscCutoff"],
 	[\masterAmp, "masterAmp"]
 ];
+
 var targetSymbols = targets.collect { |pair| pair[0] };
 var targetLabels = targets.collect { |pair| pair[1] };
 
