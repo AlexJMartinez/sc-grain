@@ -43,7 +43,8 @@ s.waitForBoot({
 	~granV21[\toggles] = IdentityDictionary.new;
 	~granV21[\menus] = IdentityDictionary.new;
 		~granV21[\modUi] = (
-		lfoIndex: 1
+		lfoIndex: 1,
+		envIndex: 1
 	);
 	~granV21[\recordSeconds] = 8.0;
 	~granV21[\dragMode] = \none;
@@ -130,6 +131,8 @@ s.waitForBoot({
 		reverbRoom: 0.75,
 		reverbDamp: 0.35,
 
+		fxOrder: 0,   // 0 = Delay -> Reverb, 1 = Reverb -> Delay
+
 		lfo1On: 0,
 		lfo1Rate: 0.35,
 		lfo1Depth: 0.25,
@@ -201,6 +204,7 @@ s.waitForBoot({
 
 		delayOn=1, delayTime=0.28, delayFb=0.30, delayMix=0.20,
 		reverbOn=1, reverbMix=0.18, reverbRoom=0.75, reverbDamp=0.35,
+		fxOrder=0,
 
 		lfo1On=0, lfo1Rate=0.35, lfo1Depth=0.25, lfo1Shape=0,
 		lfo1Dest1=0, lfo1Amt1=0.0,
@@ -232,6 +236,7 @@ var aCenterPos, bCenterPos, aForwardPos, bForwardPos, aPingPongPos, bPingPongPos
 var filt1RQ, filt2RQ, applyFilter;
 var lfo1, lfo2, lfoShapeSel, lfo2ShapeSel, destApply;
 var modEnv1, destApplyEnv;
+var delayInput, delayOut, reverbInput, reverbOut;
 
 var modAPos, modBPos, modF1Cutoff, modF2Cutoff, modDelayMix;
 var modADensity, modBDensity, modAScanWidth, modBScanWidth, modOscCutoff, modMasterAmp;
@@ -529,37 +534,87 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			parallelSig
 		]);
 
-		// ---------------- Delay ----------------
+				// ---------------- FX Order ----------------
+		// fxOrder: 0 = Delay -> Reverb
+		//          1 = Reverb -> Delay
+
+		delayInput = sig;
+
 		delaySig = CombC.ar(
-			sig,
+			delayInput,
 			1.5,
 			delayTime.clip(0.01, 1.5),
 			(delayFb.clip(0.001, 0.95) * 6.0).clip(0.001, 6.0)
 		);
 
-		wetDelaySig = (sig * 0.7) + (delaySig * 0.7);
+		wetDelaySig = (delayInput * 0.7) + (delaySig * 0.7);
 
-			sig = SelectX.ar(
+		delayOut = SelectX.ar(
 			(
 				(delayMix + ((modDelayMix + modEnvDelayMix) * 0.5)).clip(0, 1)
 				* delayOn.clip(0, 1)
 			),
 			[
-				sig,
+				delayInput,
 				wetDelaySig
 			]
 		);
 
-		// ---------------- Reverb ----------------
-		revSig = FreeVerb2.ar(
-			sig[0],
-			sig[1],
+		reverbInput = sig;
+
+		reverbOut = FreeVerb2.ar(
+			reverbInput[0],
+			reverbInput[1],
 			reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
 			reverbRoom.clip(0, 1),
 			reverbDamp.clip(0, 1)
 		);
 
-		sig = revSig;
+		sig = SelectX.ar(
+			fxOrder.clip(0, 1),
+			[
+				// 0 = Delay -> Reverb
+				FreeVerb2.ar(
+					delayOut[0],
+					delayOut[1],
+					reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
+					reverbRoom.clip(0, 1),
+					reverbDamp.clip(0, 1)
+				),
+
+				// 1 = Reverb -> Delay
+				{
+					var revFirst, delAfter, wetAfter;
+					revFirst = FreeVerb2.ar(
+						sig[0],
+						sig[1],
+						reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
+						reverbRoom.clip(0, 1),
+						reverbDamp.clip(0, 1)
+					);
+
+					delAfter = CombC.ar(
+						revFirst,
+						1.5,
+						delayTime.clip(0.01, 1.5),
+						(delayFb.clip(0.001, 0.95) * 6.0).clip(0.001, 6.0)
+					);
+
+					wetAfter = (revFirst * 0.7) + (delAfter * 0.7);
+
+					SelectX.ar(
+						(
+							(delayMix + ((modDelayMix + modEnvDelayMix) * 0.5)).clip(0, 1)
+							* delayOn.clip(0, 1)
+						),
+						[
+							revFirst,
+							wetAfter
+						]
+					)
+				}.value
+			]
+		);
 
 		env = EnvGen.kr(
 			Env.asr(atk.max(0.001), 1.0, rel.max(0.001)),
@@ -628,6 +683,7 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			\reverbMix, p[\reverbMix],
 			\reverbRoom, p[\reverbRoom],
 			\reverbDamp, p[\reverbDamp],
+			\fxOrder, p[\fxOrder],
 
 			\lfo1On, p[\lfo1On],
 			\lfo1Rate, p[\lfo1Rate],
@@ -1179,6 +1235,7 @@ loopLen: loopLen,
 		if(~granV21[\menus][\filter1Type].notNil) { ~granV21[\menus][\filter1Type].value = p[\filter1Type] ? 0 };
 		if(~granV21[\menus][\filter2Type].notNil) { ~granV21[\menus][\filter2Type].value = p[\filter2Type] ? 0 };
 		if(~granV21[\menus][\filterRouting].notNil) { ~granV21[\menus][\filterRouting].value = p[\filterRouting] ? 0 };
+		if(~granV21[\menus][\fxOrder].notNil) { ~granV21[\menus][\fxOrder].value = p[\fxOrder] ? 0 };
 		if(~granV21[\menus][\lfo1Shape].notNil) { ~granV21[\menus][\lfo1Shape].value = p[\lfo1Shape] ? 0 };
 		if(~granV21[\menus][\lfo1Dest1].notNil) { ~granV21[\menus][\lfo1Dest1].value = p[\lfo1Dest1] ? 0 };
 		if(~granV21[\menus][\lfo1Dest2].notNil) { ~granV21[\menus][\lfo1Dest2].value = p[\lfo1Dest2] ? 0 };
@@ -1208,6 +1265,7 @@ loopLen: loopLen,
 		if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
 
 		if(~granV21[\refreshModLfoUi].notNil) { ~granV21[\refreshModLfoUi].value; };
+		if(~granV21[\refreshModEnvUi].notNil) { ~granV21[\refreshModEnvUi].value; };
 	};
 
 
@@ -1227,9 +1285,9 @@ loopLen: loopLen,
 			~granV21[\modLfoRoutingTitle].string_(routeTitleStr);
 		};
 
-		if(~granV21[\modLfoToggleLabel].notNil) {
-			~granV21[\modLfoToggleLabel].string_(if(idx == 1) { "Editing: LFO 1" } { "Editing: LFO 2" });
-		};
+	if(~granV21[\modLfoToggleLabel].notNil) {
+	~granV21[\modLfoToggleLabel].string_("LFO View");
+};
 
 		if(~granV21[\toggles][\modLfoOn].notNil) {
 			~granV21[\toggles][\modLfoOn].value = ~granV21[\params][(prefix ++ "On").asSymbol];
@@ -1294,6 +1352,105 @@ loopLen: loopLen,
 			~granV21[\boxes][\modLfoAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol];
 		};
 	};
+
+
+
+	~granV21[\refreshModEnvUi] = {
+	var idx = ~granV21[\modUi][\envIndex] ? 1;
+	var prefix, titleStr, routeTitleStr;
+
+	prefix = if(idx == 1) { "modEnv1" } { "modEnv2" };
+	titleStr = if(idx == 1) { "Mod Env 1" } { "Mod Env 2" };
+	routeTitleStr = if(idx == 1) { "Env 1 Routing" } { "Env 2 Routing" };
+
+	if(~granV21[\modEnvTitle].notNil) {
+		~granV21[\modEnvTitle].string_(titleStr);
+	};
+
+	if(~granV21[\modEnvRoutingTitle].notNil) {
+		~granV21[\modEnvRoutingTitle].string_(routeTitleStr);
+	};
+
+	if(~granV21[\modEnvToggleLabel].notNil) {
+	~granV21[\modEnvToggleLabel].string_("Env View");
+};
+
+	if(~granV21[\sliders][\modEnvAtk].notNil) {
+		~granV21[\sliders][\modEnvAtk].value = ~granV21[\params][(prefix ++ "Atk").asSymbol].explin(0.001, 4, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvAtk].notNil) {
+		~granV21[\boxes][\modEnvAtk].value = ~granV21[\params][(prefix ++ "Atk").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvDec].notNil) {
+		~granV21[\sliders][\modEnvDec].value = ~granV21[\params][(prefix ++ "Dec").asSymbol].explin(0.001, 4, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvDec].notNil) {
+		~granV21[\boxes][\modEnvDec].value = ~granV21[\params][(prefix ++ "Dec").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvSus].notNil) {
+		~granV21[\sliders][\modEnvSus].value = ~granV21[\params][(prefix ++ "Sus").asSymbol].clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvSus].notNil) {
+		~granV21[\boxes][\modEnvSus].value = ~granV21[\params][(prefix ++ "Sus").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvRel].notNil) {
+		~granV21[\sliders][\modEnvRel].value = ~granV21[\params][(prefix ++ "Rel").asSymbol].explin(0.001, 6, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvRel].notNil) {
+		~granV21[\boxes][\modEnvRel].value = ~granV21[\params][(prefix ++ "Rel").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvDepth].notNil) {
+		~granV21[\sliders][\modEnvDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol].clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvDepth].notNil) {
+		~granV21[\boxes][\modEnvDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol];
+	};
+
+	if(~granV21[\menus][\modEnvDest1].notNil) {
+		~granV21[\menus][\modEnvDest1].value = ~granV21[\params][(prefix ++ "Dest1").asSymbol] ? 0;
+	};
+	if(~granV21[\menus][\modEnvDest2].notNil) {
+		~granV21[\menus][\modEnvDest2].value = ~granV21[\params][(prefix ++ "Dest2").asSymbol] ? 0;
+	};
+	if(~granV21[\menus][\modEnvDest3].notNil) {
+		~granV21[\menus][\modEnvDest3].value = ~granV21[\params][(prefix ++ "Dest3").asSymbol] ? 0;
+	};
+	if(~granV21[\menus][\modEnvDest4].notNil) {
+		~granV21[\menus][\modEnvDest4].value = ~granV21[\params][(prefix ++ "Dest4").asSymbol] ? 0;
+	};
+
+	if(~granV21[\sliders][\modEnvAmt1].notNil) {
+		~granV21[\sliders][\modEnvAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvAmt1].notNil) {
+		~granV21[\boxes][\modEnvAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvAmt2].notNil) {
+		~granV21[\sliders][\modEnvAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvAmt2].notNil) {
+		~granV21[\boxes][\modEnvAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvAmt3].notNil) {
+		~granV21[\sliders][\modEnvAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvAmt3].notNil) {
+		~granV21[\boxes][\modEnvAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol];
+	};
+
+	if(~granV21[\sliders][\modEnvAmt4].notNil) {
+		~granV21[\sliders][\modEnvAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
+	};
+	if(~granV21[\boxes][\modEnvAmt4].notNil) {
+		~granV21[\boxes][\modEnvAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol];
+	};
+};
 
 
 	~granV21[\spawnVisualDots] = { |which|
@@ -2258,7 +2415,17 @@ StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
 		~granV21[\makeSliderRow].value(page, 305, "Room",     \reverbRoom, 0, 1, \lin, 3);
 		~granV21[\makeSliderRow].value(page, 335, "Damp",     \reverbDamp, 0, 1, \lin, 3);
 
+
+
 		// Order
+		StaticText(page, Rect(12, 365, 120, 20)).string_("FX Order");
+		~granV21[\menus][\fxOrder] = PopUpMenu(page, Rect(105, 365, 180, 20))
+			.items_(["Delay -> Reverb", "Reverb -> Delay"])
+			.value_(~granV21[\params][\fxOrder] ? 0)
+			.action_({ |pm|
+				~granV21[\params][\fxOrder] = pm.value;
+				~granV21[\updateAllVoices].value;
+			});
 
 		StaticText(page, Rect(560, 85, 430, 180))
 			.string_(
@@ -2375,8 +2542,8 @@ StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
 
 		StaticText(page, Rect(12, 10, 140, 20)).string_("Modulation");
 
-		~granV21[\modLfoToggleLabel] = StaticText(page, Rect(180, 10, 120, 20))
-			.string_("Editing: LFO 1");
+		~granV21[\modLfoToggleLabel] = StaticText(page, Rect(180, 10, 92, 20))
+	.string_("LFO View");
 
 		Button(page, Rect(306, 8, 92, 24))
 			.states_([["LFO 1"], ["LFO 2"]])
@@ -2562,35 +2729,232 @@ StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
 			~granV21[\updateAllVoices].value;
 		});
 
+				// ------------------------------------------------
+		// COLUMN 3 : DISPLAYED MOD ENV CORE
 		// ------------------------------------------------
-		// COLUMN 3 : MOD ENV 1 CORE
-		// ------------------------------------------------
-		StaticText(page, Rect(col3X, topY, 160, 20)).string_("Mod Env 1");
+		~granV21[\modEnvTitle] = StaticText(page, Rect(col3X, topY, 160, 20)).string_("Mod Env 1");
 
-		makeTinySliderRow.value(page, col3X, topY + 28,  "Atk",   \modEnv1Atk,   0.001, 4, \exp, 3);
-		makeTinySliderRow.value(page, col3X, topY + 58,  "Dec",   \modEnv1Dec,   0.001, 4, \exp, 3);
-		makeTinySliderRow.value(page, col3X, topY + 88,  "Sus",   \modEnv1Sus,   0, 1, \lin, 3);
-		makeTinySliderRow.value(page, col3X, topY + 118, "Rel",   \modEnv1Rel,   0.001, 6, \exp, 3);
+	~granV21[\modEnvToggleLabel] = StaticText(page, Rect(730, 10, 92, 20))
+	.string_("Env View");
+
+Button(page, Rect(856, 8, 92, 24))
+	.states_([["Env 1"], ["Env 2"]])
+	.value_(0)
+	.action_({ |bt|
+		~granV21[\modUi][\envIndex] = if(bt.value == 0) { 1 } { 2 };
+		~granV21[\refreshModEnvUi].value;
+	});
+
+		makeTinySliderRow.value(page, col3X, topY + 28, "Atk", \modEnv1Atk, 0.001, 4, \exp, 3);
+		~granV21[\sliders][\modEnvAtk] = ~granV21[\sliders].removeAt(\modEnv1Atk);
+		~granV21[\boxes][\modEnvAtk] = ~granV21[\boxes].removeAt(\modEnv1Atk);
+
+		~granV21[\sliders][\modEnvAtk].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvAtk].value.linexp(0, 1, 0.001, 4);
+			~granV21[\params][(prefix ++ "Atk").asSymbol] = v;
+			~granV21[\boxes][\modEnvAtk].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvAtk].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvAtk].value.clip(0.001, 4);
+			~granV21[\params][(prefix ++ "Atk").asSymbol] = v;
+			~granV21[\sliders][\modEnvAtk].value = v.explin(0.001, 4, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
+
+		makeTinySliderRow.value(page, col3X, topY + 58, "Dec", \modEnv1Dec, 0.001, 4, \exp, 3);
+		~granV21[\sliders][\modEnvDec] = ~granV21[\sliders].removeAt(\modEnv1Dec);
+		~granV21[\boxes][\modEnvDec] = ~granV21[\boxes].removeAt(\modEnv1Dec);
+
+		~granV21[\sliders][\modEnvDec].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvDec].value.linexp(0, 1, 0.001, 4);
+			~granV21[\params][(prefix ++ "Dec").asSymbol] = v;
+			~granV21[\boxes][\modEnvDec].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvDec].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvDec].value.clip(0.001, 4);
+			~granV21[\params][(prefix ++ "Dec").asSymbol] = v;
+			~granV21[\sliders][\modEnvDec].value = v.explin(0.001, 4, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
+
+		makeTinySliderRow.value(page, col3X, topY + 88, "Sus", \modEnv1Sus, 0, 1, \lin, 3);
+		~granV21[\sliders][\modEnvSus] = ~granV21[\sliders].removeAt(\modEnv1Sus);
+		~granV21[\boxes][\modEnvSus] = ~granV21[\boxes].removeAt(\modEnv1Sus);
+
+		~granV21[\sliders][\modEnvSus].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvSus].value.clip(0, 1);
+			~granV21[\params][(prefix ++ "Sus").asSymbol] = v;
+			~granV21[\boxes][\modEnvSus].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvSus].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvSus].value.clip(0, 1);
+			~granV21[\params][(prefix ++ "Sus").asSymbol] = v;
+			~granV21[\sliders][\modEnvSus].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+
+		makeTinySliderRow.value(page, col3X, topY + 118, "Rel", \modEnv1Rel, 0.001, 6, \exp, 3);
+		~granV21[\sliders][\modEnvRel] = ~granV21[\sliders].removeAt(\modEnv1Rel);
+		~granV21[\boxes][\modEnvRel] = ~granV21[\boxes].removeAt(\modEnv1Rel);
+
+		~granV21[\sliders][\modEnvRel].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvRel].value.linexp(0, 1, 0.001, 6);
+			~granV21[\params][(prefix ++ "Rel").asSymbol] = v;
+			~granV21[\boxes][\modEnvRel].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvRel].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvRel].value.clip(0.001, 6);
+			~granV21[\params][(prefix ++ "Rel").asSymbol] = v;
+			~granV21[\sliders][\modEnvRel].value = v.explin(0.001, 6, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
+
 		makeTinySliderRow.value(page, col3X, topY + 148, "Depth", \modEnv1Depth, 0, 1, \lin, 3);
+		~granV21[\sliders][\modEnvDepth] = ~granV21[\sliders].removeAt(\modEnv1Depth);
+		~granV21[\boxes][\modEnvDepth] = ~granV21[\boxes].removeAt(\modEnv1Depth);
+
+		~granV21[\sliders][\modEnvDepth].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvDepth].value.clip(0, 1);
+			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
+			~granV21[\boxes][\modEnvDepth].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvDepth].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvDepth].value.clip(0, 1);
+			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
+			~granV21[\sliders][\modEnvDepth].value = v;
+			~granV21[\updateAllVoices].value;
+		});
 
 		// ------------------------------------------------
-		// COLUMN 4 : MOD ENV 1 ROUTING
+		// COLUMN 4 : DISPLAYED MOD ENV ROUTING
 		// ------------------------------------------------
-		StaticText(page, Rect(col4X, topY, 180, 20)).string_("Env 1 Routing");
+		~granV21[\modEnvRoutingTitle] = StaticText(page, Rect(col4X, topY, 180, 20)).string_("Env 1 Routing");
 
-		makeTinyMenuRow.value(page, col4X, topY + 28,  "Dest 1", \modEnv1Dest1);
+		makeTinyMenuRow.value(page, col4X, topY + 28, "Dest 1", \modEnv1Dest1);
+		~granV21[\menus][\modEnvDest1] = ~granV21[\menus].removeAt(\modEnv1Dest1);
+		~granV21[\menus][\modEnvDest1].action_({ |menu|
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			~granV21[\params][(prefix ++ "Dest1").asSymbol] = menu.value;
+			~granV21[\updateAllVoices].value;
+		});
+
 		makeTinySliderRow.value(page, col4X, topY + 56, "Amt 1", \modEnv1Amt1, -1, 1, \lin, 3);
+		~granV21[\sliders][\modEnvAmt1] = ~granV21[\sliders].removeAt(\modEnv1Amt1);
+		~granV21[\boxes][\modEnvAmt1] = ~granV21[\boxes].removeAt(\modEnv1Amt1);
 
-		makeTinyMenuRow.value(page, col4X, topY + 96,  "Dest 2", \modEnv1Dest2);
+		~granV21[\sliders][\modEnvAmt1].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvAmt1].value.linlin(0, 1, -1, 1);
+			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
+			~granV21[\boxes][\modEnvAmt1].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvAmt1].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvAmt1].value.clip(-1, 1);
+			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
+			~granV21[\sliders][\modEnvAmt1].value = v.linlin(-1, 1, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
+
+		makeTinyMenuRow.value(page, col4X, topY + 96, "Dest 2", \modEnv1Dest2);
+		~granV21[\menus][\modEnvDest2] = ~granV21[\menus].removeAt(\modEnv1Dest2);
+		~granV21[\menus][\modEnvDest2].action_({ |menu|
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			~granV21[\params][(prefix ++ "Dest2").asSymbol] = menu.value;
+			~granV21[\updateAllVoices].value;
+		});
+
 		makeTinySliderRow.value(page, col4X, topY + 124, "Amt 2", \modEnv1Amt2, -1, 1, \lin, 3);
+		~granV21[\sliders][\modEnvAmt2] = ~granV21[\sliders].removeAt(\modEnv1Amt2);
+		~granV21[\boxes][\modEnvAmt2] = ~granV21[\boxes].removeAt(\modEnv1Amt2);
+
+		~granV21[\sliders][\modEnvAmt2].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvAmt2].value.linlin(0, 1, -1, 1);
+			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
+			~granV21[\boxes][\modEnvAmt2].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvAmt2].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvAmt2].value.clip(-1, 1);
+			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
+			~granV21[\sliders][\modEnvAmt2].value = v.linlin(-1, 1, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
 
 		makeTinyMenuRow.value(page, col4X, topY + 164, "Dest 3", \modEnv1Dest3);
+		~granV21[\menus][\modEnvDest3] = ~granV21[\menus].removeAt(\modEnv1Dest3);
+		~granV21[\menus][\modEnvDest3].action_({ |menu|
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			~granV21[\params][(prefix ++ "Dest3").asSymbol] = menu.value;
+			~granV21[\updateAllVoices].value;
+		});
+
 		makeTinySliderRow.value(page, col4X, topY + 192, "Amt 3", \modEnv1Amt3, -1, 1, \lin, 3);
+		~granV21[\sliders][\modEnvAmt3] = ~granV21[\sliders].removeAt(\modEnv1Amt3);
+		~granV21[\boxes][\modEnvAmt3] = ~granV21[\boxes].removeAt(\modEnv1Amt3);
+
+		~granV21[\sliders][\modEnvAmt3].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvAmt3].value.linlin(0, 1, -1, 1);
+			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
+			~granV21[\boxes][\modEnvAmt3].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvAmt3].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvAmt3].value.clip(-1, 1);
+			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
+			~granV21[\sliders][\modEnvAmt3].value = v.linlin(-1, 1, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
 
 		makeTinyMenuRow.value(page, col4X, topY + 232, "Dest 4", \modEnv1Dest4);
+		~granV21[\menus][\modEnvDest4] = ~granV21[\menus].removeAt(\modEnv1Dest4);
+		~granV21[\menus][\modEnvDest4].action_({ |menu|
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			~granV21[\params][(prefix ++ "Dest4").asSymbol] = menu.value;
+			~granV21[\updateAllVoices].value;
+		});
+
 		makeTinySliderRow.value(page, col4X, topY + 260, "Amt 4", \modEnv1Amt4, -1, 1, \lin, 3);
+		~granV21[\sliders][\modEnvAmt4] = ~granV21[\sliders].removeAt(\modEnv1Amt4);
+		~granV21[\boxes][\modEnvAmt4] = ~granV21[\boxes].removeAt(\modEnv1Amt4);
+
+		~granV21[\sliders][\modEnvAmt4].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\sliders][\modEnvAmt4].value.linlin(0, 1, -1, 1);
+			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
+			~granV21[\boxes][\modEnvAmt4].value = v;
+			~granV21[\updateAllVoices].value;
+		});
+		~granV21[\boxes][\modEnvAmt4].action_({
+			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
+			var v = ~granV21[\boxes][\modEnvAmt4].value.clip(-1, 1);
+			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
+			~granV21[\sliders][\modEnvAmt4].value = v.linlin(-1, 1, 0, 1);
+			~granV21[\updateAllVoices].value;
+		});
 
 		~granV21[\refreshModLfoUi].value;
+		~granV21[\refreshModEnvUi].value;
 
 		~granV21[\pages].add(page);
 	}.value;
