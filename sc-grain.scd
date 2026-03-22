@@ -31,7 +31,9 @@ s.waitForBoot({
 	~granV21[\buf] = nil;
 	~granV21[\sampleBuf] = nil;
 	~granV21[\liveBuf] = nil;
+	~granV21[\freezeBuf] = nil;
 	~granV21[\recSynth] = nil;
+	~granV21[\previewSynth] = nil;
 	~granV21[\waveData] = FloatArray.newClear(0);
 	~granV21[\samplePath] = "No sample loaded";
 	~granV21[\voices] = IdentityDictionary.new;   // midi note -> Synth
@@ -46,6 +48,7 @@ s.waitForBoot({
 		lfoIndex: 1,
 		envIndex: 1
 	);
+	~granV21[\freezeCapturedFrac] = 1.0;
 	~granV21[\recordSeconds] = 8.0;
 	~granV21[\dragMode] = \none;
 	~granV21[\dragTarget] = \none;
@@ -79,6 +82,13 @@ s.waitForBoot({
 		regionEnd: 1.0,
 		aPosition: 0.5,
 		bPosition: 0.5,
+
+		freezeOn: 0,
+		freezeSourceMode: 0,   // 0 = current buf snapshot, 1 = liveBuf snapshot
+		freezeLockA: 0,
+		freezeLockB: 0,
+		freezePosA: 0.5,
+		freezePosB: 0.5,
 
 		aOn: 1,
 		aAmp: 0.9,
@@ -173,6 +183,20 @@ s.waitForBoot({
 		modEnv1Dest4: 4,
 		modEnv1Amt4: 0.0,
 
+		modEnv2Atk: 0.02,
+		modEnv2Dec: 0.30,
+		modEnv2Sus: 0.0,
+		modEnv2Rel: 0.40,
+		modEnv2Depth: 0.35,
+		modEnv2Dest1: 0,
+		modEnv2Amt1: 0.0,
+		modEnv2Dest2: 1,
+		modEnv2Amt2: 0.0,
+		modEnv2Dest3: 2,
+		modEnv2Amt3: 0.0,
+		modEnv2Dest4: 4,
+		modEnv2Amt4: 0.0,
+
 		hpf: 20,
 		lpf: 18000,
 
@@ -181,7 +205,7 @@ s.waitForBoot({
 
 		xyX: 0.5,
 		xyY: 0.5,
-		xyXTarget: \position,
+		xyXTarget: \aPosition,
 		xyYTarget: \aJitter
 	);
 
@@ -191,7 +215,9 @@ s.waitForBoot({
 	SynthDef(\granVoiceV21, {
 		|out=0, bufnum=0, gate=1,
 		masterAmp=0.35, pitchRatio=1.0, glide=0.03,
-		regionStart=0.0, regionEnd=1.0, loopStart=0.0, loopEnd=1.0, position=0.5, aPosition=0.5, bPosition=0.5,
+regionStart=0.0, regionEnd=1.0, loopStart=0.0, loopEnd=1.0, aPosition=0.5, bPosition=0.5,
+		freezeOn=0, freezeLockA=0, freezeLockB=0, freezePosA=0.5, freezePosB=0.5, freezeBufnum=0,
+freezeLoopStart=0.0, freezeLoopEnd=1.0,
 
 		aOn=1, aAmp=0.9, aDensity=18, aDur=0.11, aJitter=0.04, aRateMul=1.0, aRateRand=0.05, aScanRate=0.08, aScanWidth=0.08, aScanMode=0, aPanWidth=0.55,
 		bOn=1, bAmp=0.65, bDensity=8, bDur=0.20, bJitter=0.08, bRateMul=0.5, bRateRand=0.04, bScanRate=0.03, bScanWidth=0.15, bScanMode=0, bPanWidth=0.8,
@@ -224,39 +250,66 @@ s.waitForBoot({
 		modEnv1Dest3=2, modEnv1Amt3=0.0,
 		modEnv1Dest4=4, modEnv1Amt4=0.0,
 
+		modEnv2Atk=0.02, modEnv2Dec=0.30, modEnv2Sus=0.0, modEnv2Rel=0.40, modEnv2Depth=0.35,
+		modEnv2Dest1=0, modEnv2Amt1=0.0,
+		modEnv2Dest2=1, modEnv2Amt2=0.0,
+		modEnv2Dest3=2, modEnv2Amt3=0.0,
+		modEnv2Dest4=4, modEnv2Amt4=0.0,
+
 		hpf=20, lpf=18000, atk=0.01, rel=0.35|
 
-var env, bufDur;
-var regStartSec, regEndSec, regLen;
+var env, playBufnum, bufDur;
+var regStartSec, regEndSec;
 var loopStartNorm, loopEndNorm, loopStartSec, loopEndSec, loopLen;
 var aBasePosNorm, bBasePosNorm;
 var trigA, trigB, posA, posB, rateA, rateB, panA, panB, sigA, sigB;
-var freq, osc, sig, rawSig, filt1Sig, filt2Sig, seriesSig, parallelSig, delaySig, wetDelaySig, revSig, scanA, scanB, ratioLag;
+var freq, osc, sig, rawSig, filt1Sig, filt2Sig, seriesSig, parallelSig, delaySig, wetDelaySig, scanA, scanB, ratioLag;
 var aCenterPos, bCenterPos, aForwardPos, bForwardPos, aPingPongPos, bPingPongPos;
 var filt1RQ, filt2RQ, applyFilter;
 var lfo1, lfo2, lfoShapeSel, lfo2ShapeSel, destApply;
-var modEnv1, destApplyEnv;
-var delayInput, delayOut, reverbInput, reverbOut;
+var modEnv1, modEnv2, destApplyEnv, destApplyEnv2;
+var delayInput, delayOut;
 
 var modAPos, modBPos, modF1Cutoff, modF2Cutoff, modDelayMix;
 var modADensity, modBDensity, modAScanWidth, modBScanWidth, modOscCutoff, modMasterAmp;
 
-var modEnvAPos, modEnvBPos, modEnvF1Cutoff, modEnvF2Cutoff, modEnvDelayMix;
-var modEnvADensity, modEnvBDensity, modEnvAScanWidth, modEnvBScanWidth, modEnvOscCutoff, modEnvMasterAmp;
+var modEnv1APos, modEnv1BPos, modEnv1F1Cutoff, modEnv1F2Cutoff, modEnv1DelayMix;
+var modEnv1ADensity, modEnv1BDensity, modEnv1AScanWidth, modEnv1BScanWidth, modEnv1OscCutoff, modEnv1MasterAmp;
+
+var modEnv2APos, modEnv2BPos, modEnv2F1Cutoff, modEnv2F2Cutoff, modEnv2DelayMix;
+var modEnv2ADensity, modEnv2BDensity, modEnv2AScanWidth, modEnv2BScanWidth, modEnv2OscCutoff, modEnv2MasterAmp;
 
 var aDensityMod, bDensityMod, aScanWidthMod, bScanWidthMod, oscCutoffMod, masterAmpMod;
 
 
-bufDur = BufDur.kr(bufnum).max(0.001);
+
+playBufnum = Select.kr(freezeOn.clip(0, 1), [bufnum, freezeBufnum]);
+bufDur = BufDur.kr(playBufnum).max(0.001);
+
 
 regStartSec = regionStart.clip(0, 1) * bufDur;
 regEndSec = regionEnd.clip(0, 1) * bufDur;
 regEndSec = max(regEndSec, regStartSec + 0.001);
-regLen = (regEndSec - regStartSec).max(0.001);
 
-// loop lives inside region
-loopStartNorm = loopStart.clip(regionStart.clip(0, 1), regionEnd.clip(0, 1) - 0.001);
-loopEndNorm = loopEnd.clip(loopStartNorm + 0.001, regionEnd.clip(0, 1));
+
+// loop mapping:
+// normal mode = loop lives inside selected region of source buffer
+// freeze mode = copied material is rebased into freezeBuf, so use 0..1 there
+loopStartNorm = Select.kr(
+	freezeOn.clip(0, 1),
+	[
+		loopStart.clip(regionStart.clip(0, 1), regionEnd.clip(0, 1) - 0.001),
+		freezeLoopStart.clip(0, 1)
+	]
+);
+
+loopEndNorm = Select.kr(
+	freezeOn.clip(0, 1),
+	[
+		loopEnd.clip(loopStartNorm + 0.001, regionEnd.clip(0, 1)),
+		freezeLoopEnd.clip(loopStartNorm + 0.001, 1.0)
+	]
+);
 
 loopStartSec = loopStartNorm * bufDur;
 loopEndSec = loopEndNorm * bufDur;
@@ -306,6 +359,17 @@ modEnv1 = EnvGen.kr(
 	gate
 ) * modEnv1Depth.clip(0, 1);
 
+
+modEnv2 = EnvGen.kr(
+	Env.adsr(
+		modEnv2Atk.max(0.001),
+		modEnv2Dec.max(0.001),
+		modEnv2Sus.clip(0, 1),
+		modEnv2Rel.max(0.001)
+	),
+	gate
+) * modEnv2Depth.clip(0, 1);
+
 modAPos = 0.0;
 modBPos = 0.0;
 modF1Cutoff = 0.0;
@@ -318,17 +382,29 @@ modBScanWidth = 0.0;
 modOscCutoff = 0.0;
 modMasterAmp = 0.0;
 
-modEnvAPos = 0.0;
-modEnvBPos = 0.0;
-modEnvF1Cutoff = 0.0;
-modEnvF2Cutoff = 0.0;
-modEnvDelayMix = 0.0;
-modEnvADensity = 0.0;
-modEnvBDensity = 0.0;
-modEnvAScanWidth = 0.0;
-modEnvBScanWidth = 0.0;
-modEnvOscCutoff = 0.0;
-modEnvMasterAmp = 0.0;
+modEnv1APos = 0.0;
+modEnv1BPos = 0.0;
+modEnv1F1Cutoff = 0.0;
+modEnv1F2Cutoff = 0.0;
+modEnv1DelayMix = 0.0;
+modEnv1ADensity = 0.0;
+modEnv1BDensity = 0.0;
+modEnv1AScanWidth = 0.0;
+modEnv1BScanWidth = 0.0;
+modEnv1OscCutoff = 0.0;
+modEnv1MasterAmp = 0.0;
+
+modEnv2APos = 0.0;
+modEnv2BPos = 0.0;
+modEnv2F1Cutoff = 0.0;
+modEnv2F2Cutoff = 0.0;
+modEnv2DelayMix = 0.0;
+modEnv2ADensity = 0.0;
+modEnv2BDensity = 0.0;
+modEnv2AScanWidth = 0.0;
+modEnv2BScanWidth = 0.0;
+modEnv2OscCutoff = 0.0;
+modEnv2MasterAmp = 0.0;
 
 destApply = { |src, dest, amt|
 	var val = src * amt.clip(-1, 1);
@@ -349,17 +425,33 @@ destApply = { |src, dest, amt|
 destApplyEnv = { |dest, amt|
 	var val = modEnv1 * amt.clip(-1, 1);
 
-	if(dest == 0)  { modEnvAPos = modEnvAPos + val };
-	if(dest == 1)  { modEnvBPos = modEnvBPos + val };
-	if(dest == 2)  { modEnvF1Cutoff = modEnvF1Cutoff + val };
-	if(dest == 3)  { modEnvF2Cutoff = modEnvF2Cutoff + val };
-	if(dest == 4)  { modEnvDelayMix = modEnvDelayMix + val };
-	if(dest == 5)  { modEnvADensity = modEnvADensity + val };
-	if(dest == 6)  { modEnvBDensity = modEnvBDensity + val };
-	if(dest == 7)  { modEnvAScanWidth = modEnvAScanWidth + val };
-	if(dest == 8)  { modEnvBScanWidth = modEnvBScanWidth + val };
-	if(dest == 9)  { modEnvOscCutoff = modEnvOscCutoff + val };
-	if(dest == 10) { modEnvMasterAmp = modEnvMasterAmp + val };
+	if(dest == 0)  { modEnv1APos = modEnv1APos + val };
+	if(dest == 1)  { modEnv1BPos = modEnv1BPos + val };
+	if(dest == 2)  { modEnv1F1Cutoff = modEnv1F1Cutoff + val };
+	if(dest == 3)  { modEnv1F2Cutoff = modEnv1F2Cutoff + val };
+	if(dest == 4)  { modEnv1DelayMix = modEnv1DelayMix + val };
+	if(dest == 5)  { modEnv1ADensity = modEnv1ADensity + val };
+	if(dest == 6)  { modEnv1BDensity = modEnv1BDensity + val };
+	if(dest == 7)  { modEnv1AScanWidth = modEnv1AScanWidth + val };
+	if(dest == 8)  { modEnv1BScanWidth = modEnv1BScanWidth + val };
+	if(dest == 9)  { modEnv1OscCutoff = modEnv1OscCutoff + val };
+	if(dest == 10) { modEnv1MasterAmp = modEnv1MasterAmp + val };
+};
+
+destApplyEnv2 = { |dest, amt|
+	var val = modEnv2 * amt.clip(-1, 1);
+
+	if(dest == 0)  { modEnv2APos = modEnv2APos + val };
+	if(dest == 1)  { modEnv2BPos = modEnv2BPos + val };
+	if(dest == 2)  { modEnv2F1Cutoff = modEnv2F1Cutoff + val };
+	if(dest == 3)  { modEnv2F2Cutoff = modEnv2F2Cutoff + val };
+	if(dest == 4)  { modEnv2DelayMix = modEnv2DelayMix + val };
+	if(dest == 5)  { modEnv2ADensity = modEnv2ADensity + val };
+	if(dest == 6)  { modEnv2BDensity = modEnv2BDensity + val };
+	if(dest == 7)  { modEnv2AScanWidth = modEnv2AScanWidth + val };
+	if(dest == 8)  { modEnv2BScanWidth = modEnv2BScanWidth + val };
+	if(dest == 9)  { modEnv2OscCutoff = modEnv2OscCutoff + val };
+	if(dest == 10) { modEnv2MasterAmp = modEnv2MasterAmp + val };
 };
 
 destApply.value(lfo1, lfo1Dest1, lfo1Amt1);
@@ -377,21 +469,39 @@ destApplyEnv.value(modEnv1Dest2, modEnv1Amt2);
 destApplyEnv.value(modEnv1Dest3, modEnv1Amt3);
 destApplyEnv.value(modEnv1Dest4, modEnv1Amt4);
 
-aBasePosNorm = (aPosition + modAPos + modEnvAPos).clip(0, 1);
-bBasePosNorm = (bPosition + modBPos + modEnvBPos).clip(0, 1);
+destApplyEnv2.value(modEnv2Dest1, modEnv2Amt1);
+destApplyEnv2.value(modEnv2Dest2, modEnv2Amt2);
+destApplyEnv2.value(modEnv2Dest3, modEnv2Amt3);
+destApplyEnv2.value(modEnv2Dest4, modEnv2Amt4);
 
-aDensityMod = (aDensity * (modADensity + modEnvADensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
-bDensityMod = (bDensity * (modBDensity + modEnvBDensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
+aBasePosNorm = Select.kr(
+	freezeLockA.clip(0, 1),
+	[
+		(aPosition + modAPos + modEnv1APos + modEnv2APos).clip(0, 1),
+		freezePosA.clip(0, 1)
+	]
+);
 
-aScanWidthMod = (aScanWidth + ((modAScanWidth + modEnvAScanWidth) * 0.5)).clip(0, 1);
-bScanWidthMod = (bScanWidth + ((modBScanWidth + modEnvBScanWidth) * 0.5)).clip(0, 1);
+bBasePosNorm = Select.kr(
+	freezeLockB.clip(0, 1),
+	[
+		(bPosition + modBPos + modEnv1BPos + modEnv2BPos).clip(0, 1),
+		freezePosB.clip(0, 1)
+	]
+);
+
+aDensityMod = (aDensity * (modADensity + modEnv1ADensity + modEnv2ADensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
+bDensityMod = (bDensity * (modBDensity + modEnv1BDensity + modEnv2BDensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
+
+aScanWidthMod = (aScanWidth + ((modAScanWidth + modEnv1AScanWidth + modEnv2AScanWidth) * 0.5)).clip(0, 1);
+bScanWidthMod = (bScanWidth + ((modBScanWidth + modEnv1BScanWidth + modEnv2BScanWidth) * 0.5)).clip(0, 1);
 
 oscCutoffMod = (
-	oscCutoff * (modOscCutoff + modEnvOscCutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
+	oscCutoff * (modOscCutoff + modEnv1OscCutoff + modEnv2OscCutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
 ).clip(80, 18000);
 
 masterAmpMod = (
-	masterAmp * (modMasterAmp + modEnvMasterAmp).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
+	masterAmp * (modMasterAmp + modEnv1MasterAmp + modEnv2MasterAmp).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
 ).clip(0, 1);
 
 
@@ -430,7 +540,7 @@ panA = TRand.kr(0 - aPanWidth.clip(0,1), aPanWidth.clip(0,1), trigA);
 			numChannels: 2,
 			trigger: trigA,
 			dur: aDur.max(0.005),
-			sndbuf: bufnum,
+			sndbuf: playBufnum,
 			rate: rateA,
 			pos: ((loopStartSec + (posA * loopLen)) / bufDur).clip(0, 1),
 			interp: 4,
@@ -471,7 +581,7 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			numChannels: 2,
 			trigger: trigB,
 			dur: bDur.max(0.005),
-			sndbuf: bufnum,
+			sndbuf: playBufnum,
 			rate: rateB,
 			pos: ((loopStartSec + (posB * loopLen)) / bufDur).clip(0, 1),
 			interp: 4,
@@ -501,7 +611,7 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			filter1Type,
 			(
 				filter1Cutoff
-				* (modF1Cutoff + modEnvF1Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
+				* (modF1Cutoff + modEnv1F1Cutoff + modEnv2F1Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
 			).clip(20, 20000),
 			filt1RQ
 		);
@@ -512,20 +622,20 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			filter2Type,
 			(
 				filter2Cutoff
-				* (modF2Cutoff + modEnvF2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
+				* (modF2Cutoff + modEnv1F2Cutoff + modEnv2F2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
 			).clip(20, 20000),
 			filt2RQ
 		);
 
 				seriesSig = applyFilter.value(
-			filt1Sig,
-			filter2Type,
-			(
-				filter2Cutoff
-				* (modF2Cutoff + modEnvF2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-			).clip(20, 20000),
-			filt2RQ
-		);
+	filt1Sig,
+	filter2Type,
+	(
+		filter2Cutoff
+		* (modF2Cutoff + modEnv1F2Cutoff + modEnv2F2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
+	).clip(20, 20000),
+	filt2RQ
+);
 
 		parallelSig = (filt1Sig + filt2Sig) * 0.5;
 
@@ -551,7 +661,7 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 
 		delayOut = SelectX.ar(
 			(
-				(delayMix + ((modDelayMix + modEnvDelayMix) * 0.5)).clip(0, 1)
+				(delayMix + ((modDelayMix + modEnv1DelayMix + modEnv2DelayMix) * 0.5)).clip(0, 1)
 				* delayOn.clip(0, 1)
 			),
 			[
@@ -560,15 +670,7 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			]
 		);
 
-		reverbInput = sig;
 
-		reverbOut = FreeVerb2.ar(
-			reverbInput[0],
-			reverbInput[1],
-			reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
-			reverbRoom.clip(0, 1),
-			reverbDamp.clip(0, 1)
-		);
 
 		sig = SelectX.ar(
 			fxOrder.clip(0, 1),
@@ -603,26 +705,29 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 					wetAfter = (revFirst * 0.7) + (delAfter * 0.7);
 
 					SelectX.ar(
-						(
-							(delayMix + ((modDelayMix + modEnvDelayMix) * 0.5)).clip(0, 1)
-							* delayOn.clip(0, 1)
-						),
-						[
-							revFirst,
-							wetAfter
-						]
-					)
+	(
+		(delayMix + ((modDelayMix + modEnv1DelayMix + modEnv2DelayMix) * 0.5)).clip(0, 1)
+		* delayOn.clip(0, 1)
+	),
+	[
+		revFirst,
+		wetAfter
+	]
+)
 				}.value
 			]
 		);
 
-		env = EnvGen.kr(
-			Env.asr(atk.max(0.001), 1.0, rel.max(0.001)),
-			gate,
-			doneAction: 2
-		);
+		sig = HPF.ar(sig, hpf.clip(20, 18000));
+sig = LPF.ar(sig, lpf.clip(50, 20000));
 
-		Out.ar(out, sig * masterAmpMod * env);
+env = EnvGen.kr(
+	Env.asr(atk.max(0.001), 1.0, rel.max(0.001)),
+	gate,
+	doneAction: 2
+);
+
+Out.ar(out, sig * masterAmpMod * env);
 	}).add;
 
 	SynthDef(\granInputRecorderV21, { |bufnum=0, in=0, recLevel=1.0, preLevel=0.0, run=1, loop=0|
@@ -652,6 +757,14 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 \loopEnd, (~granV21[\view][\loopEnd] ? 1.0),
 \aPosition, p[\aPosition],
 \bPosition, p[\bPosition],
+\freezeOn, p[\freezeOn],
+\freezeLockA, p[\freezeLockA],
+\freezeLockB, p[\freezeLockB],
+\freezePosA, p[\freezePosA],
+\freezePosB, p[\freezePosB],
+\freezeBufnum, (~granV21[\freezeBuf] ? 0),
+\freezeLoopStart, 0.0,
+\freezeLoopEnd, (~granV21[\freezeCapturedFrac] ? 1.0),
 
 			\aOn, p[\aOn], \aAmp, p[\aAmp], \aDensity, p[\aDensity], \aDur, p[\aDur],
 			\aJitter, p[\aJitter], \aRateMul, p[\aRateMul], \aRateRand, p[\aRateRand],
@@ -728,22 +841,41 @@ panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
 			\modEnv1Dest4, p[\modEnv1Dest4],
 			\modEnv1Amt4, p[\modEnv1Amt4],
 
+			\modEnv2Atk, p[\modEnv2Atk],
+			\modEnv2Dec, p[\modEnv2Dec],
+			\modEnv2Sus, p[\modEnv2Sus],
+			\modEnv2Rel, p[\modEnv2Rel],
+			\modEnv2Depth, p[\modEnv2Depth],
+
+			\modEnv2Dest1, p[\modEnv2Dest1],
+			\modEnv2Amt1, p[\modEnv2Amt1],
+			\modEnv2Dest2, p[\modEnv2Dest2],
+			\modEnv2Amt2, p[\modEnv2Amt2],
+			\modEnv2Dest3, p[\modEnv2Dest3],
+			\modEnv2Amt3, p[\modEnv2Amt3],
+			\modEnv2Dest4, p[\modEnv2Dest4],
+			\modEnv2Amt4, p[\modEnv2Amt4],
+
 
 			\hpf, p[\hpf], \lpf, p[\lpf], \atk, p[\atk], \rel, p[\rel]
 		]
 	};
 
-	~granV21[\updateAllVoices] = {
-		~granV21[\voices].keysValuesDo { |note, sy|
-			if(sy.notNil) {
-				sy.set(*~granV21[\voiceArgs].value(note));
-			};
+~granV21[\updateAllVoices] = {
+	~granV21[\voices].keysValuesDo { |note, sy|
+		if(sy.notNil) {
+			sy.set(*~granV21[\voiceArgs].value(note));
 		};
-
-		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
 	};
+
+	if(~granV21[\previewSynth].notNil) {
+		~granV21[\previewSynth].set(*~granV21[\voiceArgs].value(~granV21[\previewNote]));
+	};
+
+	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
+	if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
+};
 
 	~granV21[\noteOn] = { |note, vel=100|
 		var sy;
@@ -771,11 +903,18 @@ if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
 	};
 
 	~granV21[\panic] = {
-		~granV21[\voices].keysValuesDo { |note, sy|
-			try { sy.set(\gate, 0) } { };
-		};
-		~granV21[\voices].clear;
+	~granV21[\voices].keysValuesDo { |note, sy|
+		try { sy.set(\gate, 0) } { };
 	};
+	~granV21[\voices].clear;
+
+	if(~granV21[\previewSynth].notNil) {
+		try { ~granV21[\previewSynth].set(\gate, 0) } { };
+		~granV21[\previewSynth] = nil;
+	};
+
+	~granV21[\isPreviewing] = false;
+};
 
 	~granV21[\allocLiveBuf] = {
 		var frames = (s.sampleRate * ~granV21[\recordSeconds]).asInteger.max(44100);
@@ -787,18 +926,134 @@ if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
 
 
 
+~granV21[\allocFreezeBuf] = {
+	var frames = (s.sampleRate * (~granV21[\recordSeconds] ? 8.0)).asInteger.max(44100);
+
+	if(~granV21[\freezeBuf].notNil) {
+		try { ~granV21[\freezeBuf].free } { };
+	};
+
+	~granV21[\freezeBuf] = Buffer.alloc(s, frames, 1);
+};
+
+
+		~granV21[\captureBufToFreeze] = { |srcBuf|
+	var p = ~granV21[\params];
+	var v = ~granV21[\view];
+	var srcFrames, loopStartFrame, loopEndFrame, copyFrames;
+
+	if(srcBuf.isNil) {
+		"No source buffer available for freeze capture.".warn;
+		^nil;
+	};
+
+	if(~granV21[\freezeBuf].isNil) {
+		~granV21[\allocFreezeBuf].value;
+	};
+
+	srcFrames = srcBuf.numFrames;
+
+	loopStartFrame = (((v[\loopStart] ? p[\regionStart]).clip(0, 1)) * srcFrames).asInteger;
+	loopEndFrame = (((v[\loopEnd] ? p[\regionEnd]).clip(0, 1)) * srcFrames).asInteger;
+
+	copyFrames = (loopEndFrame - loopStartFrame).max(1);
+	copyFrames = copyFrames.min(~granV21[\freezeBuf].numFrames);
+
+	~granV21[\freezeCapturedFrac] = (
+		copyFrames / (~granV21[\freezeBuf].numFrames.max(1))
+	).clip(0.001, 1.0);
+
+	~granV21[\freezeBuf].zero;
+
+	srcBuf.copyData(
+		~granV21[\freezeBuf],
+		dstStartAt: 0,
+		srcStartAt: loopStartFrame,
+		numSamples: copyFrames
+	);
+
+	s.sync;
+
+	~granV21[\params][\freezePosA] = ~granV21[\params][\aPosition].clip(0, 1);
+	~granV21[\params][\freezePosB] = ~granV21[\params][\bPosition].clip(0, 1);
+
+	~granV21[\updateAllVoices].value;
+	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
+};
+
+
+
+~granV21[\captureCurrentToFreeze] = {
+	if(~granV21[\buf].isNil) {
+		"No current buffer to freeze.".warn;
+		^nil;
+	};
+
+	~granV21[\captureBufToFreeze].value(~granV21[\buf]);
+};
+
+
+
+~granV21[\captureLiveToFreeze] = {
+	if(~granV21[\liveBuf].isNil) {
+		"No live buffer to freeze.".warn;
+		^nil;
+	};
+
+	~granV21[\captureBufToFreeze].value(~granV21[\liveBuf]);
+};
+
+
+
+
+		~granV21[\toggleFreeze] = {
+	var p = ~granV21[\params];
+
+	if(p[\freezeOn] == 0) {
+		if(~granV21[\freezeBuf].isNil) {
+			~granV21[\allocFreezeBuf].value;
+		};
+
+		if(p[\freezeSourceMode] == 1) {
+			~granV21[\captureLiveToFreeze].value;
+		} {
+			~granV21[\captureCurrentToFreeze].value;
+		};
+
+		p[\freezeOn] = 1;
+	} {
+		p[\freezeOn] = 0;
+	};
+
+	~granV21[\syncControls].value;
+	~granV21[\refreshWaveData].value;
+~granV21[\updateAllVoices].value;
+if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
+
+	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
+	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
+};
+
+
+
 ~granV21[\setCurrentBuffer] = { |buf, label|
 	if(buf.isNil) {
 		"setCurrentBuffer got nil buffer.".warn;
 		^nil;
 	};
 
+
+
+
+
+
 	// stop anything currently sounding before swapping buffers
 	~granV21[\panic].value;
 	~granV21[\isPreviewing] = false;
 
 	~granV21[\buf] = buf;
-	~granV21[\sampleBuf] = buf;
+
 	~granV21[\samplePath] = label ? "Untitled";
 	~granV21[\params][\regionStart] = 0.0;
 ~granV21[\params][\regionEnd] = 1.0;
@@ -835,6 +1090,12 @@ if(~granV21[\win].notNil) { ~granV21[\win].refresh };
 
 ~granV21[\refreshWaveData] = {
 	var b = ~granV21[\buf];
+
+		b = if((~granV21[\params][\freezeOn] ? 0) == 1) {
+		~granV21[\freezeBuf]
+	} {
+		~granV21[\buf]
+	};
 
 	if(b.isNil) {
 		~granV21[\waveData] = FloatArray.newClear(0);
@@ -884,10 +1145,13 @@ if(~granV21[\miniView].notNil) {
 		};
 
 		{
-			if(~granV21[\waveView].notNil) {
-				~granV21[\waveView].refresh;
-			};
-		}.defer;
+	if(~granV21[\waveView].notNil) {
+		~granV21[\waveView].refresh;
+	};
+	if(~granV21[\miniView].notNil) {
+		~granV21[\miniView].refresh;
+	};
+}.defer;
 	});
 };
 
@@ -918,6 +1182,7 @@ if(~granV21[\miniView].notNil) {
 			channels: [0],
 			action: { |buf|
 				("Buffer.readChannel callback fired: " ++ buf).postln;
+					~granV21[\sampleBuf] = buf;
 				~granV21[\setCurrentBuffer].value(
 					buf,
 					PathName(path).fileName
@@ -966,21 +1231,33 @@ if(~granV21[\miniView].notNil) {
 	};
 
 	~granV21[\previewOn] = {
-		if(~granV21[\buf].isNil) {
-			"No sample or live buffer loaded.".warn;
-			^nil;
-		};
-
-		if(~granV21[\voices][~granV21[\previewNote]].isNil) {
-			~granV21[\noteOn].value(~granV21[\previewNote], 100);
-		};
-
-		~granV21[\isPreviewing] = true;
+	if(~granV21[\buf].isNil) {
+		"No sample or live buffer loaded.".warn;
+		^nil;
 	};
 
+	if(~granV21[\previewSynth].notNil) {
+		try { ~granV21[\previewSynth].set(\gate, 0) } { };
+		~granV21[\previewSynth] = nil;
+	};
+
+	~granV21[\previewSynth] = Synth(
+		\granVoiceV21,
+		~granV21[\voiceArgs].value(~granV21[\previewNote])
+	);
+
+	~granV21[\isPreviewing] = true;
+if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
+};
+
 	~granV21[\previewOff] = {
-	~granV21[\noteOff].value(~granV21[\previewNote]);
+	if(~granV21[\previewSynth].notNil) {
+		try { ~granV21[\previewSynth].set(\gate, 0) } { };
+		~granV21[\previewSynth] = nil;
+	};
+
 	~granV21[\isPreviewing] = false;
+if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
 
 	~granV21[\grainDotsA].clear;
 	~granV21[\grainDotsB].clear;
@@ -1150,9 +1427,12 @@ loopLen: loopLen,
 		var p = ~granV21[\params];
 
 		[
-			[\masterAmp, 0, 1, \lin],
-			[\atk, 0.001, 2, \exp],
-			[\rel, 0.001, 4, \exp],
+
+	[\masterAmp, 0, 1, \lin],
+	[\rootMidi, 24, 96, \lin],
+	[\glide, 0.001, 1.0, \exp],
+	[\atk, 0.001, 2, \exp],
+	[\rel, 0.001, 4, \exp],
 
 			[\aAmp, 0, 1, \lin],
 			[\aPosition, 0, 1, \lin],
@@ -1160,9 +1440,10 @@ loopLen: loopLen,
 			[\aDur, 0.005, 1.0, \exp],
 			[\aJitter, 0, 1, \lin],
 			[\aRateMul, -2, 2, \lin],
-			[\aRateRand, 0, 1, \lin],
-			[\aScanRate, 0.001, 6, \exp],
-			[\aScanWidth, 0, 1, \lin],
+[\aRateRand, 0, 1, \lin],
+[\aScanRate, 0.001, 6, \exp],
+[\aScanWidth, 0, 1, \lin],
+[\aPanWidth, 0, 1, \lin],
 
 			[\bAmp, 0, 1, \lin],
 			[\bPosition, 0, 1, \lin],
@@ -1170,9 +1451,10 @@ loopLen: loopLen,
 			[\bDur, 0.005, 1.0, \exp],
 			[\bJitter, 0, 1, \lin],
 			[\bRateMul, -2, 2, \lin],
-			[\bRateRand, 0, 1, \lin],
-			[\bScanRate, 0.001, 6, \exp],
-			[\bScanWidth, 0, 1, \lin],
+[\bRateRand, 0, 1, \lin],
+[\bScanRate, 0.001, 6, \exp],
+[\bScanWidth, 0, 1, \lin],
+[\bPanWidth, 0, 1, \lin],
 
 			[\oscAmp, 0, 1, \lin],
 			[\oscDetune, -24, 24, \lin],
@@ -1217,6 +1499,17 @@ loopLen: loopLen,
 			[\modEnv1Amt3, -1, 1, \lin],
 			[\modEnv1Amt4, -1, 1, \lin],
 
+			[\modEnv2Atk, 0.001, 4, \exp],
+			[\modEnv2Dec, 0.001, 4, \exp],
+			[\modEnv2Sus, 0, 1, \lin],
+			[\modEnv2Rel, 0.001, 6, \exp],
+			[\modEnv2Depth, 0, 1, \lin],
+			[\modEnv2Amt1, -1, 1, \lin],
+			[\modEnv2Amt2, -1, 1, \lin],
+			[\modEnv2Amt3, -1, 1, \lin],
+			[\modEnv2Amt4, -1, 1, \lin],
+
+
 			[\hpf, 20, 8000, \exp],
 			[\lpf, 100, 20000, \exp]
 		].do { |row|
@@ -1227,7 +1520,11 @@ loopLen: loopLen,
 		if(~granV21[\toggles][\bOn].notNil) { ~granV21[\toggles][\bOn].value = p[\bOn] };
 		if(~granV21[\toggles][\oscOn].notNil) { ~granV21[\toggles][\oscOn].value = p[\oscOn] };
 		if(~granV21[\toggles][\lfo1On].notNil) { ~granV21[\toggles][\lfo1On].value = p[\lfo1On] };
-				if(~granV21[\toggles][\lfo2On].notNil) { ~granV21[\toggles][\lfo2On].value = p[\lfo2On] };
+		if(~granV21[\toggles][\lfo2On].notNil) { ~granV21[\toggles][\lfo2On].value = p[\lfo2On] };
+		if(~granV21[\toggles][\freezeOn].notNil) { ~granV21[\toggles][\freezeOn].value = p[\freezeOn] };
+		if(~granV21[\toggles][\freezeLockA].notNil) { ~granV21[\toggles][\freezeLockA].value = p[\freezeLockA] };
+		if(~granV21[\toggles][\freezeLockB].notNil) { ~granV21[\toggles][\freezeLockB].value = p[\freezeLockB] };
+
 
 		if(~granV21[\menus][\oscWave].notNil) { ~granV21[\menus][\oscWave].value = p[\oscWave] };
 		if(~granV21[\menus][\aScanMode].notNil) { ~granV21[\menus][\aScanMode].value = p[\aScanMode] ? 0 };
@@ -1252,6 +1549,13 @@ loopLen: loopLen,
 		if(~granV21[\menus][\modEnv1Dest3].notNil) { ~granV21[\menus][\modEnv1Dest3].value = p[\modEnv1Dest3] ? 0 };
 		if(~granV21[\menus][\modEnv1Dest4].notNil) { ~granV21[\menus][\modEnv1Dest4].value = p[\modEnv1Dest4] ? 0 };
 
+				if(~granV21[\menus][\modEnv2Dest1].notNil) { ~granV21[\menus][\modEnv2Dest1].value = p[\modEnv2Dest1] ? 0 };
+		if(~granV21[\menus][\modEnv2Dest2].notNil) { ~granV21[\menus][\modEnv2Dest2].value = p[\modEnv2Dest2] ? 0 };
+		if(~granV21[\menus][\modEnv2Dest3].notNil) { ~granV21[\menus][\modEnv2Dest3].value = p[\modEnv2Dest3] ? 0 };
+		if(~granV21[\menus][\modEnv2Dest4].notNil) { ~granV21[\menus][\modEnv2Dest4].value = p[\modEnv2Dest4] ? 0 };
+
+		if(~granV21[\menus][\freezeSourceMode].notNil) { ~granV21[\menus][\freezeSourceMode].value = p[\freezeSourceMode] ? 0 };
+
 		if(~granV21[\toggles][\delayOn].notNil) { ~granV21[\toggles][\delayOn].value = p[\delayOn] };
 		if(~granV21[\toggles][\reverbOn].notNil) { ~granV21[\toggles][\reverbOn].value = p[\reverbOn] };
 
@@ -1265,7 +1569,33 @@ loopLen: loopLen,
 		if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
 
 		if(~granV21[\refreshModLfoUi].notNil) { ~granV21[\refreshModLfoUi].value; };
-		if(~granV21[\refreshModEnvUi].notNil) { ~granV21[\refreshModEnvUi].value; };
+if(~granV21[\refreshModEnvUi].notNil) { ~granV21[\refreshModEnvUi].value; };
+if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
+	};
+
+
+			~granV21[\refreshStatusStrip] = {
+		var p = ~granV21[\params];
+		var freezeState, freezeSrc, lockState, previewState, bufName, txt;
+
+		freezeState = if((p[\freezeOn] ? 0) == 1) { "Freeze: ON" } { "Freeze: OFF" };
+		freezeSrc = if((p[\freezeSourceMode] ? 0) == 1) { "Source: Live Buffer" } { "Source: Current Buffer" };
+
+		lockState =
+			"A Lock: " ++ if((p[\freezeLockA] ? 0) == 1) { "ON" } { "OFF" }
+			++ "  |  "
+			++ "B Lock: " ++ if((p[\freezeLockB] ? 0) == 1) { "ON" } { "OFF" };
+
+		previewState = if(~granV21[\isPreviewing] == true) { "Preview: ON" } { "Preview: OFF" };
+		bufName = "Buffer: " ++ (~granV21[\samplePath] ? "No sample loaded");
+
+		txt = bufName ++ "    |    " ++ freezeState ++ "    |    " ++ freezeSrc
+		++ "    |    " ++ lockState ++ "    |    " ++ previewState;
+
+		if(~granV21[\statusStrip].notNil) {
+			~granV21[\statusStrip].string_(txt);
+			~granV21[\statusStrip].refresh;
+		};
 	};
 
 
@@ -1546,6 +1876,7 @@ loopLen: loopLen,
 	// build buffer + midi
 	// --------------------------------------------------------
 	~granV21[\allocLiveBuf].value;
+	~granV21[\allocFreezeBuf].value;
 	~granV21[\setupMIDI].value;
 
 	// --------------------------------------------------------
@@ -1627,6 +1958,9 @@ loopLen: loopLen,
 	var xFromNorm, x1, x2, xpos, lx1, lx2;
 	var startIndex, endIndex, visibleData;
 
+	var freezeOn, freezeAx, freezeBx, freezePosAAbs, freezePosBAbs;
+	var lockAOn, lockBOn;
+
 	xFromNorm = { |norm|
 		((norm - visStart) / visibleFrac * w).clip(0, w);
 	};
@@ -1663,11 +1997,32 @@ x2 = xFromNorm.value(p[\regionEnd]);
 lx1 = xFromNorm.value(v[\loopStart] ? 0.0);
 lx2 = xFromNorm.value(v[\loopEnd] ? 1.0);
 
+
+freezeOn = (p[\freezeOn] ? 0) == 1;
+lockAOn = (p[\freezeLockA] ? 0) == 1;
+lockBOn = (p[\freezeLockB] ? 0) == 1;
+
+freezePosAAbs = ((v[\loopStart] ? p[\regionStart]) + ((p[\freezePosA] ? 0.5).clip(0, 1) * ((v[\loopEnd] ? p[\regionEnd]) - (v[\loopStart] ? p[\regionStart])))).clip(0, 1);
+freezePosBAbs = ((v[\loopStart] ? p[\regionStart]) + ((p[\freezePosB] ? 0.5).clip(0, 1) * ((v[\loopEnd] ? p[\regionEnd]) - (v[\loopStart] ? p[\regionStart])))).clip(0, 1);
+
+freezeAx = xFromNorm.value(freezePosAAbs);
+freezeBx = xFromNorm.value(freezePosBAbs);
+
+
 	// region highlight only if visible
 	if((p[\regionEnd] > visStart) and: { p[\regionStart] < visEnd }) {
 		Pen.fillColor = Color.yellow.alpha_(0.14);
 		Pen.fillRect(Rect(x1, 0, (x2 - x1).max(1), h));
 	};
+
+if(freezeOn) {
+	var flx1, flx2;
+	flx1 = xFromNorm.value((v[\loopStart] ? p[\regionStart]).clip(0, 1));
+	flx2 = xFromNorm.value((v[\loopEnd] ? p[\regionEnd]).clip(0, 1));
+
+	Pen.fillColor = Color(0.35, 0.7, 1.0).alpha_(0.10);
+	Pen.fillRect(Rect(flx1, 0, (flx2 - flx1).max(1), h));
+};
 
 	// region edges
 	Pen.color = Color(0.8, 0.65, 0.0);
@@ -1899,6 +2254,28 @@ if(~granV21[\buf].notNil) {
 		Pen.lineTo(Point(bX, h * 0.88));
 		Pen.stroke;
 	};
+
+			if(freezeOn and: { freezePosAAbs >= visStart } and: { freezePosAAbs <= visEnd }) {
+	Pen.color = if(lockAOn) {
+		Color.cyan.alpha_(0.45)
+	} {
+		Color.cyan.alpha_(0.22)
+	};
+	Pen.moveTo(Point(freezeAx, h * 0.04));
+	Pen.lineTo(Point(freezeAx, h * 0.96));
+	Pen.stroke;
+};
+
+if(freezeOn and: { freezePosBAbs >= visStart } and: { freezePosBAbs <= visEnd }) {
+	Pen.color = if(lockBOn) {
+		Color.magenta.alpha_(0.45)
+	} {
+		Color.magenta.alpha_(0.22)
+	};
+	Pen.moveTo(Point(freezeBx, h * 0.04));
+	Pen.lineTo(Point(freezeBx, h * 0.96));
+	Pen.stroke;
+};
 };
 
 
@@ -1945,6 +2322,21 @@ if(~granV21[\buf].notNil) {
 	Pen.color = Color.gray(0.25);
 	Pen.addRect(Rect(visStart * w, 0, ((visEnd - visStart) * w).max(2), h));
 	Pen.stroke;
+
+
+		if((~granV21[\params][\freezeOn] ? 0) == 1) {
+	var loopStartMini, loopEndMini;
+
+	loopStartMini = ((~granV21[\view][\loopStart] ? ~granV21[\params][\regionStart]).clip(0, 1)) * w;
+	loopEndMini = ((~granV21[\view][\loopEnd] ? ~granV21[\params][\regionEnd]).clip(0, 1)) * w;
+
+	Pen.fillColor = Color(0.35, 0.7, 1.0).alpha_(0.14);
+	Pen.fillRect(Rect(loopStartMini, 0, (loopEndMini - loopStartMini).max(1), h));
+
+	Pen.color = Color(0.35, 0.7, 1.0).alpha_(0.35);
+	Pen.addRect(Rect(loopStartMini, 0, (loopEndMini - loopStartMini).max(1), h));
+	Pen.stroke;
+};
 });
 
 
@@ -2139,12 +2531,18 @@ if(~granV21[\buf].notNil) {
 	vw[\loopEnd] = (vw[\loopEnd] ? p[\regionEnd]).clip(vw[\loopStart] + 0.01, p[\regionEnd]);
 },
 
-		\aPosition, {
+\aPosition, {
 	p[\aPosition] = ((norm - m[\loopStart]) / (m[\loopEnd] - m[\loopStart]).max(0.001)).clip(0, 1);
+	if((p[\freezeLockA] ? 0) == 0) {
+		p[\freezePosA] = p[\aPosition];
+	};
 },
 
 \bPosition, {
 	p[\bPosition] = ((norm - m[\loopStart]) / (m[\loopEnd] - m[\loopStart]).max(0.001)).clip(0, 1);
+	if((p[\freezeLockB] ? 0) == 0) {
+		p[\freezePosB] = p[\bPosition];
+	};
 },
 
 		\loopStart, {
@@ -2224,20 +2622,41 @@ PopUpMenu(page, Rect(575, 66, 120, 20))
 		~granV21[\view][\editMode] = [\region, \loop, \scroll][pm.value];
 	});
 
-		~granV21[\makeSliderRow].value(page, 108, "Master",  \masterAmp, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 138, "Attack",  \atk, 0.001, 2, \exp, 3);
-~granV21[\makeSliderRow].value(page, 168, "Release", \rel, 0.001, 4, \exp, 3);
+		~granV21[\makeSliderRow].value(page, 108, "Master",    \masterAmp, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 138, "Root MIDI", \rootMidi, 24, 96, \lin, 0);
+~granV21[\makeSliderRow].value(page, 168, "Glide",     \glide, 0.001, 1.0, \exp, 3);
+~granV21[\makeSliderRow].value(page, 198, "Attack",    \atk, 0.001, 2, \exp, 3);
+~granV21[\makeSliderRow].value(page, 228, "Release",   \rel, 0.001, 4, \exp, 3);
 
-StaticText(page, Rect(12, 215, 190, 20)).string_("Live Buffer Length (sec)");
-NumberBox(page, Rect(205, 215, 90, 20))
+StaticText(page, Rect(500, 108, 90, 20)).string_("Preview Note");
+NumberBox(page, Rect(595, 108, 70, 20))
+	.value_(~granV21[\previewNote])
+	.decimals_(0)
+	.action_({ |nb|
+		~granV21[\previewNote] = nb.value.asInteger.clip(24, 96);
+		if(~granV21[\previewSynth].notNil) {
+			try {
+				~granV21[\previewSynth].set(\gate, 0);
+			} { };
+			~granV21[\previewSynth] = Synth(
+				\granVoiceV21,
+				~granV21[\voiceArgs].value(~granV21[\previewNote])
+			);
+		};
+		if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
+	});
+
+StaticText(page, Rect(12, 270, 190, 20)).string_("Live Buffer Length (sec)");
+NumberBox(page, Rect(205, 270, 90, 20))
 			.value_(~granV21[\recordSeconds])
 			.decimals_(2)
 			.action_({ |nb|
-				~granV21[\recordSeconds] = nb.value.clip(1.0, 60.0);
-				~granV21[\allocLiveBuf].value;
+			~granV21[\recordSeconds] = nb.value.clip(1.0, 60.0);
+~granV21[\allocLiveBuf].value;
+~granV21[\allocFreezeBuf].value;
 			});
 
-		StaticText(page, Rect(12, 260, 900, 120))
+		StaticText(page, Rect(12, 305, 900, 95))
 			.string_(
 				"Version 2.1 notes:\n"
 				++ "• MIDI note-on creates a new voice.\n"
@@ -2266,9 +2685,10 @@ NumberBox(page, Rect(205, 215, 90, 20))
 ~granV21[\makeSliderRow].value(page, 255, "RateRand", \aRateRand, 0, 1, \lin, 3);
 ~granV21[\makeSliderRow].value(page, 285, "ScanRate", \aScanRate, 0.001, 6, \exp, 3);
 ~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \aScanWidth, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 345, "PanWidth", \aPanWidth, 0, 1, \lin, 3);
 
-StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
-~granV21[\menus][\aScanMode] = PopUpMenu(page, Rect(105, 345, 120, 20))
+StaticText(page, Rect(12, 375, 90, 20)).string_("Scan Mode");
+~granV21[\menus][\aScanMode] = PopUpMenu(page, Rect(105, 375, 120, 20))
 	.items_(["Center", "Forward", "PingPong"])
 	.value_(~granV21[\params][\aScanMode] ? 0)
 	.action_({ |pm|
@@ -2295,9 +2715,10 @@ StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
 ~granV21[\makeSliderRow].value(page, 255, "RateRand", \bRateRand, 0, 1, \lin, 3);
 ~granV21[\makeSliderRow].value(page, 285, "ScanRate", \bScanRate, 0.001, 6, \exp, 3);
 ~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \bScanWidth, 0, 1, \lin, 3);
+~granV21[\makeSliderRow].value(page, 345, "PanWidth", \bPanWidth, 0, 1, \lin, 3);
 
-StaticText(page, Rect(12, 345, 90, 20)).string_("Scan Mode");
-~granV21[\menus][\bScanMode] = PopUpMenu(page, Rect(105, 345, 120, 20))
+StaticText(page, Rect(12, 375, 90, 20)).string_("Scan Mode");
+~granV21[\menus][\bScanMode] = PopUpMenu(page, Rect(105, 375, 120, 20))
 	.items_(["Center", "Forward", "PingPong"])
 	.value_(~granV21[\params][\bScanMode] ? 0)
 	.action_({ |pm|
@@ -2988,23 +3409,88 @@ var targetLabels = targets.collect { |pair| pair[1] };
 
 		StaticText(page, Rect(12, 10, 250, 20)).string_("Perform / XY / MIDI");
 
-		StaticText(page, Rect(12, 42, 80, 20)).string_("X Target");
-PopUpMenu(page, Rect(95, 42, 160, 20))
+			~granV21[\statusStrip] = StaticText(page, Rect(12, 32, 1036, 18))
+	.string_("Buffer: No sample loaded")
+	.align_(\left);
+
+		StaticText(page, Rect(12, 58, 80, 20)).string_("X Target");
+PopUpMenu(page, Rect(95, 58, 160, 20))
 	.items_(targetLabels)
 	.value_(targetSymbols.indexOfEqual(~granV21[\params][\xyXTarget]) ? 0)
 	.action_({ |pm|
 		~granV21[\params][\xyXTarget] = targetSymbols[pm.value];
 	});
 
-StaticText(page, Rect(270, 42, 80, 20)).string_("Y Target");
-PopUpMenu(page, Rect(352, 42, 160, 20))
+StaticText(page, Rect(270, 58, 80, 20)).string_("Y Target");
+PopUpMenu(page, Rect(352, 58, 160, 20))
 	.items_(targetLabels)
 	.value_(targetSymbols.indexOfEqual(~granV21[\params][\xyYTarget]) ? 0)
 	.action_({ |pm|
 		~granV21[\params][\xyYTarget] = targetSymbols[pm.value];
 	});
 
-		~granV21[\xyView] = UserView(page, Rect(12, 80, 360, 260))
+
+
+		StaticText(page, Rect(540, 58, 70, 20)).string_("Freeze");
+~granV21[\toggles][\freezeOn] = Button(page, Rect(610, 58, 80, 22))
+	.states_([["Off"], ["On"]])
+	.value_(~granV21[\params][\freezeOn])
+	.action_({ |bt|
+		if(bt.value == 1) {
+			if((~granV21[\params][\freezeOn] ? 0) == 0) {
+				~granV21[\toggleFreeze].value;
+			};
+		} {
+			if((~granV21[\params][\freezeOn] ? 0) == 1) {
+				~granV21[\toggleFreeze].value;
+			};
+		};
+	});
+
+StaticText(page, Rect(705, 58, 60, 20)).string_("Source");
+~granV21[\menus][\freezeSourceMode] = PopUpMenu(page, Rect(765, 58, 140, 20))
+	.items_(["Current Buffer", "Live Buffer"])
+	.value_(~granV21[\params][\freezeSourceMode] ? 0)
+	.action_({ |pm|
+		~granV21[\params][\freezeSourceMode] = pm.value;
+	});
+
+Button(page, Rect(920, 58, 128, 22))
+	.states_([["Capture -> Freeze"]])
+	.action_({
+		if((~granV21[\params][\freezeSourceMode] ? 0) == 1) {
+			~granV21[\captureLiveToFreeze].value;
+		} {
+			~granV21[\captureCurrentToFreeze].value;
+		};
+	});
+
+
+		StaticText(page, Rect(540, 90, 80, 20)).string_("Freeze Lock");
+
+~granV21[\toggles][\freezeLockA] = Button(page, Rect(625, 90, 72, 22))
+	.states_([["A Off"], ["A On"]])
+	.value_(~granV21[\params][\freezeLockA])
+	.action_({ |bt|
+		~granV21[\params][\freezeLockA] = bt.value.asInteger;
+		if(bt.value == 1) {
+			~granV21[\params][\freezePosA] = ~granV21[\params][\aPosition].clip(0, 1);
+		};
+		~granV21[\updateAllVoices].value;
+	});
+
+~granV21[\toggles][\freezeLockB] = Button(page, Rect(705, 90, 72, 22))
+	.states_([["B Off"], ["B On"]])
+	.value_(~granV21[\params][\freezeLockB])
+	.action_({ |bt|
+		~granV21[\params][\freezeLockB] = bt.value.asInteger;
+		if(bt.value == 1) {
+			~granV21[\params][\freezePosB] = ~granV21[\params][\bPosition].clip(0, 1);
+		};
+		~granV21[\updateAllVoices].value;
+	});
+
+		~granV21[\xyView] = UserView(page, Rect(12, 120, 360, 220))
 			.background_(Color.black);
 
 		~granV21[\xyView].drawFunc_({
@@ -3046,7 +3532,7 @@ PopUpMenu(page, Rect(352, 42, 160, 20))
 			view.refresh;
 		});
 
-		StaticText(page, Rect(400, 90, 620, 180))
+		StaticText(page, Rect(400, 130, 620, 180))
 			.string_(
 				"MIDI behavior in 2.1:\n"
 				++ "• note-on = create voice\n"
@@ -3066,6 +3552,7 @@ PopUpMenu(page, Rect(352, 42, 160, 20))
 	~granV21[\showPage].value(0);
 ~granV21[\win].front;
 ~granV21[\syncControls].value;
+if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
 ~granV21[\startVisualizer].value;
 
 	// --------------------------------------------------------
@@ -3090,15 +3577,23 @@ PopUpMenu(page, Rect(352, 42, 160, 20))
 			~granV21[\liveBuf] = nil;
 		};
 
+		if(~granV21[\freezeBuf].notNil) {
+	try { ~granV21[\freezeBuf].free } { };
+	~granV21[\freezeBuf] = nil;
+};
+
 		if(~granV21[\midiObjs].notNil) {
 			~granV21[\midiObjs].do { |obj|
 				try { obj.free } { };
 			};
 		};
 
-		if(~granV21[\win].notNil) {
-			try { ~granV21[\win].close } { };
-		};
+	if(~granV21[\win].notNil) {
+	var w = ~granV21[\win];
+	~granV21[\win] = nil;
+	try { w.onClose_({}) } { };
+	try { w.close } { };
+};
 	};
 
 });
