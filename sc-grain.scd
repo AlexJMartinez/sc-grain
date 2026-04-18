@@ -1,3600 +1,1829 @@
 (
 // ============================================================
-// GRANULAR APP V2.1
-// - safer architecture
-// - per-note MIDI voices with note-on / note-off
-// - dual granulators + osc layer
-// - waveform region selection
-// - XY pad
-// - live input recording
-// - page buttons
-// - preset save/load
+// LEMONDROP-STYLE GRANULAR APP V3.0
+// - 4 voice polyphony with deterministic voice stealing
+// - independent GR1 / GR2 file or live-history sources
+// - dual granular engines + waveform oscillator
+// - ENV/LFO/SEQ/X/Y/MIDI/CC modulation matrix, three slots per target
+// - Lemondrop-style FX1/FX2 bus with compressor
+// - schema-versioned presets with V2.1 migration
+// - GUI controls for every user-facing engine feature
+// - Auto Drone mode for immediate sample granulation without external MIDI
 // ============================================================
 
 s.options.memSize = 2.pow(20);
 s.options.numWireBufs = 1024;
+// Uncomment if you want to force a specific output device.
+// Server.default.options.outDevice_("Scarlett Solo 4th Gen");
 
 s.waitForBoot({
+	var app, modTargetCount, slotCount;
+	var makeMenuRow, makeToggleRow, makeSliderRow;
+	var makeSmallSliderRow, makeSmallMenuRow, makeModButton;
+	var makeGranPage, makeLfoBlock, makeSeqStepControls;
+	var sourceItems, waveItems, filterItems, fx1Items, fx2Items;
+	var lfoShapeItems, syncDivItems, modSourceItems;
+	var pageNames;
 
-	// --------------------------------------------------------
-	// cleanup previous instance
-	// --------------------------------------------------------
-	if(~granV21.notNil) {
-		try { ~granV21[\free].value } { };
+	if(~lemonV3.notNil) {
+		try { ~lemonV3[\free].value } { };
 	};
 
-	~granV21 = IdentityDictionary.new;
-
-	// --------------------------------------------------------
-	// state
-	// --------------------------------------------------------
-	~granV21[\buf] = nil;
-	~granV21[\sampleBuf] = nil;
-	~granV21[\liveBuf] = nil;
-	~granV21[\freezeBuf] = nil;
-	~granV21[\recSynth] = nil;
-	~granV21[\previewSynth] = nil;
-	~granV21[\waveData] = FloatArray.newClear(0);
-	~granV21[\samplePath] = "No sample loaded";
-	~granV21[\voices] = IdentityDictionary.new;   // midi note -> Synth
-	~granV21[\midiObjs] = List.new;
-	~granV21[\pages] = List.new;
-	~granV21[\tabButtons] = List.new;
-	~granV21[\sliders] = IdentityDictionary.new;
-	~granV21[\boxes] = IdentityDictionary.new;
-	~granV21[\toggles] = IdentityDictionary.new;
-	~granV21[\menus] = IdentityDictionary.new;
-		~granV21[\modUi] = (
-		lfoIndex: 1,
-		envIndex: 1
-	);
-	~granV21[\freezeCapturedFrac] = 1.0;
-	~granV21[\recordSeconds] = 8.0;
-	~granV21[\dragMode] = \none;
-	~granV21[\dragTarget] = \none;
-	~granV21[\dragScrollStart] = 0.0;
-~granV21[\dragScrollOrigin] = 0.0;
-	~granV21[\miniDrag] = false;
-~granV21[\miniDragOffset] = 0.0;
-~granV21[\playheadHitRadius] = 50;   // pixels
-	~granV21[\isRecording] = false;
-	~granV21[\isPreviewing] = false;
-	~granV21[\previewNote] = 60;
-~granV21[\grainDotsA] = List.new;
-~granV21[\grainDotsB] = List.new;
-~granV21[\visTime] = 0.0;
-~granV21[\visRunning] = false;
-
-	~granV21[\view] = (
-	zoom: 1.0,       // 1 = full waveform
-	scroll: 0.0,     // 0..1 scroll through zoomed view
-	editMode: \region,
-	loopStart: 0.0,
-	loopEnd: 1.0
-);
-
-	~granV21[\params] = (
-		masterAmp: 0.35,
-		rootMidi: 60,
-		glide: 0.03,
-
-		regionStart: 0.0,
-		regionEnd: 1.0,
-		aPosition: 0.5,
-		bPosition: 0.5,
-
-		freezeOn: 0,
-		freezeSourceMode: 0,   // 0 = current buf snapshot, 1 = liveBuf snapshot
-		freezeLockA: 0,
-		freezeLockB: 0,
-		freezePosA: 0.5,
-		freezePosB: 0.5,
-
-		aOn: 1,
-		aAmp: 0.9,
-		aDensity: 18.0,
-		aDur: 0.11,
-		aJitter: 0.04,
-		aRateMul: 1.0,
-		aRateRand: 0.05,
-		aScanRate: 0.08,
-		aScanWidth: 0.08,
-		aScanMode: 0,
-		aPanWidth: 0.55,
-
-		bOn: 1,
-		bAmp: 0.65,
-		bDensity: 8.0,
-		bDur: 0.20,
-		bJitter: 0.08,
-		bRateMul: 0.5,
-		bRateRand: 0.04,
-		bScanRate: 0.03,
-		bScanWidth: 0.15,
-		bScanMode: 0,
-		bPanWidth: 0.8,
-
-		oscOn: 0,
-		oscAmp: 0.18,
-		oscWave: 0,
-		oscDetune: 0.0,
-		oscCutoff: 8000,
-		oscRes: 0.15,
-
-		filter1Type: 1,
-		filter1Cutoff: 12000,
-		filter1Res: 0.15,
-
-		filter2Type: 0,
-		filter2Cutoff: 8000,
-		filter2Res: 0.15,
-
-		filterRouting: 0,
-
-		delayOn: 1,
-		delayTime: 0.28,
-		delayFb: 0.30,
-		delayMix: 0.20,
-
-		reverbOn: 1,
-		reverbMix: 0.18,
-		reverbRoom: 0.75,
-		reverbDamp: 0.35,
-
-		fxOrder: 0,   // 0 = Delay -> Reverb, 1 = Reverb -> Delay
-
-		lfo1On: 0,
-		lfo1Rate: 0.35,
-		lfo1Depth: 0.25,
-		lfo1Shape: 0,
-		lfo1Dest1: 0,
-		lfo1Amt1: 0.0,
-		lfo1Dest2: 1,
-		lfo1Amt2: 0.0,
-		lfo1Dest3: 2,
-		lfo1Amt3: 0.0,
-		lfo1Dest4: 4,
-		lfo1Amt4: 0.0,
-
-		lfo2On: 0,
-		lfo2Rate: 0.18,
-		lfo2Depth: 0.25,
-		lfo2Shape: 0,
-		lfo2Dest1: 0,
-		lfo2Amt1: 0.0,
-		lfo2Dest2: 1,
-		lfo2Amt2: 0.0,
-		lfo2Dest3: 2,
-		lfo2Amt3: 0.0,
-		lfo2Dest4: 4,
-		lfo2Amt4: 0.0,
-
-		modEnv1Atk: 0.01,
-		modEnv1Dec: 0.22,
-		modEnv1Sus: 0.0,
-		modEnv1Rel: 0.30,
-		modEnv1Depth: 0.35,
-		modEnv1Dest1: 0,
-		modEnv1Amt1: 0.0,
-		modEnv1Dest2: 1,
-		modEnv1Amt2: 0.0,
-		modEnv1Dest3: 2,
-		modEnv1Amt3: 0.0,
-		modEnv1Dest4: 4,
-		modEnv1Amt4: 0.0,
-
-		modEnv2Atk: 0.02,
-		modEnv2Dec: 0.30,
-		modEnv2Sus: 0.0,
-		modEnv2Rel: 0.40,
-		modEnv2Depth: 0.35,
-		modEnv2Dest1: 0,
-		modEnv2Amt1: 0.0,
-		modEnv2Dest2: 1,
-		modEnv2Amt2: 0.0,
-		modEnv2Dest3: 2,
-		modEnv2Amt3: 0.0,
-		modEnv2Dest4: 4,
-		modEnv2Amt4: 0.0,
-
-		hpf: 20,
-		lpf: 18000,
-
-		atk: 0.01,
-		rel: 0.35,
-
-		xyX: 0.5,
-		xyY: 0.5,
-		xyXTarget: \aPosition,
-		xyYTarget: \aJitter
-	);
-
-	// --------------------------------------------------------
-	// synthdefs
-	// --------------------------------------------------------
-	SynthDef(\granVoiceV21, {
-		|out=0, bufnum=0, gate=1,
-		masterAmp=0.35, pitchRatio=1.0, glide=0.03,
-regionStart=0.0, regionEnd=1.0, loopStart=0.0, loopEnd=1.0, aPosition=0.5, bPosition=0.5,
-		freezeOn=0, freezeLockA=0, freezeLockB=0, freezePosA=0.5, freezePosB=0.5, freezeBufnum=0,
-freezeLoopStart=0.0, freezeLoopEnd=1.0,
-
-		aOn=1, aAmp=0.9, aDensity=18, aDur=0.11, aJitter=0.04, aRateMul=1.0, aRateRand=0.05, aScanRate=0.08, aScanWidth=0.08, aScanMode=0, aPanWidth=0.55,
-		bOn=1, bAmp=0.65, bDensity=8, bDur=0.20, bJitter=0.08, bRateMul=0.5, bRateRand=0.04, bScanRate=0.03, bScanWidth=0.15, bScanMode=0, bPanWidth=0.8,
-
-				oscOn=0, oscAmp=0.18, oscWave=0, oscDetune=0.0, oscCutoff=8000, oscRes=0.15,
-
-		filter1Type=1, filter1Cutoff=12000, filter1Res=0.15,
-		filter2Type=0, filter2Cutoff=8000, filter2Res=0.15,
-		filterRouting=0,
-
-		delayOn=1, delayTime=0.28, delayFb=0.30, delayMix=0.20,
-		reverbOn=1, reverbMix=0.18, reverbRoom=0.75, reverbDamp=0.35,
-		fxOrder=0,
-
-		lfo1On=0, lfo1Rate=0.35, lfo1Depth=0.25, lfo1Shape=0,
-		lfo1Dest1=0, lfo1Amt1=0.0,
-		lfo1Dest2=1, lfo1Amt2=0.0,
-		lfo1Dest3=2, lfo1Amt3=0.0,
-		lfo1Dest4=4, lfo1Amt4=0.0,
-
-		lfo2On=0, lfo2Rate=0.18, lfo2Depth=0.25, lfo2Shape=0,
-		lfo2Dest1=0, lfo2Amt1=0.0,
-		lfo2Dest2=1, lfo2Amt2=0.0,
-		lfo2Dest3=2, lfo2Amt3=0.0,
-		lfo2Dest4=4, lfo2Amt4=0.0,
-
-		modEnv1Atk=0.01, modEnv1Dec=0.22, modEnv1Sus=0.0, modEnv1Rel=0.30, modEnv1Depth=0.35,
-		modEnv1Dest1=0, modEnv1Amt1=0.0,
-		modEnv1Dest2=1, modEnv1Amt2=0.0,
-		modEnv1Dest3=2, modEnv1Amt3=0.0,
-		modEnv1Dest4=4, modEnv1Amt4=0.0,
-
-		modEnv2Atk=0.02, modEnv2Dec=0.30, modEnv2Sus=0.0, modEnv2Rel=0.40, modEnv2Depth=0.35,
-		modEnv2Dest1=0, modEnv2Amt1=0.0,
-		modEnv2Dest2=1, modEnv2Amt2=0.0,
-		modEnv2Dest3=2, modEnv2Amt3=0.0,
-		modEnv2Dest4=4, modEnv2Amt4=0.0,
-
-		hpf=20, lpf=18000, atk=0.01, rel=0.35|
-
-var env, playBufnum, bufDur;
-var regStartSec, regEndSec;
-var loopStartNorm, loopEndNorm, loopStartSec, loopEndSec, loopLen;
-var aBasePosNorm, bBasePosNorm;
-var trigA, trigB, posA, posB, rateA, rateB, panA, panB, sigA, sigB;
-var freq, osc, sig, rawSig, filt1Sig, filt2Sig, seriesSig, parallelSig, delaySig, wetDelaySig, scanA, scanB, ratioLag;
-var aCenterPos, bCenterPos, aForwardPos, bForwardPos, aPingPongPos, bPingPongPos;
-var filt1RQ, filt2RQ, applyFilter;
-var lfo1, lfo2, lfoShapeSel, lfo2ShapeSel, destApply;
-var modEnv1, modEnv2, destApplyEnv, destApplyEnv2;
-var delayInput, delayOut;
-
-var modAPos, modBPos, modF1Cutoff, modF2Cutoff, modDelayMix;
-var modADensity, modBDensity, modAScanWidth, modBScanWidth, modOscCutoff, modMasterAmp;
-
-var modEnv1APos, modEnv1BPos, modEnv1F1Cutoff, modEnv1F2Cutoff, modEnv1DelayMix;
-var modEnv1ADensity, modEnv1BDensity, modEnv1AScanWidth, modEnv1BScanWidth, modEnv1OscCutoff, modEnv1MasterAmp;
-
-var modEnv2APos, modEnv2BPos, modEnv2F1Cutoff, modEnv2F2Cutoff, modEnv2DelayMix;
-var modEnv2ADensity, modEnv2BDensity, modEnv2AScanWidth, modEnv2BScanWidth, modEnv2OscCutoff, modEnv2MasterAmp;
-
-var aDensityMod, bDensityMod, aScanWidthMod, bScanWidthMod, oscCutoffMod, masterAmpMod;
-
-
-
-playBufnum = Select.kr(freezeOn.clip(0, 1), [bufnum, freezeBufnum]);
-bufDur = BufDur.kr(playBufnum).max(0.001);
-
-
-regStartSec = regionStart.clip(0, 1) * bufDur;
-regEndSec = regionEnd.clip(0, 1) * bufDur;
-regEndSec = max(regEndSec, regStartSec + 0.001);
-
-
-// loop mapping:
-// normal mode = loop lives inside selected region of source buffer
-// freeze mode = copied material is rebased into freezeBuf, so use 0..1 there
-loopStartNorm = Select.kr(
-	freezeOn.clip(0, 1),
-	[
-		loopStart.clip(regionStart.clip(0, 1), regionEnd.clip(0, 1) - 0.001),
-		freezeLoopStart.clip(0, 1)
-	]
-);
-
-loopEndNorm = Select.kr(
-	freezeOn.clip(0, 1),
-	[
-		loopEnd.clip(loopStartNorm + 0.001, regionEnd.clip(0, 1)),
-		freezeLoopEnd.clip(loopStartNorm + 0.001, 1.0)
-	]
-);
-
-loopStartSec = loopStartNorm * bufDur;
-loopEndSec = loopEndNorm * bufDur;
-loopLen = (loopEndSec - loopStartSec).max(0.001);
-
-ratioLag = Lag.kr(pitchRatio, glide.max(0.001));
-
-
-
-filt1RQ = (1.0 - filter1Res.clip(0, 0.98)).max(0.02);
-filt2RQ = (1.0 - filter2Res.clip(0, 0.98)).max(0.02);
-
-applyFilter = { |inSig, type, cutoff, rq|
-	SelectX.ar(type.clip(0, 3), [
-		inSig,
-		RLPF.ar(inSig, cutoff.clip(20, 20000), rq),
-		RHPF.ar(inSig, cutoff.clip(20, 20000), rq),
-		BPF.ar(inSig, cutoff.clip(20, 20000), rq)
-	])
-};
-
-						lfoShapeSel = Select.kr(lfo1Shape.clip(0, 3), [
-	SinOsc.kr(lfo1Rate.max(0.001)),
-	LFTri.kr(lfo1Rate.max(0.001)),
-	LFSaw.kr(lfo1Rate.max(0.001)),
-	LFPulse.kr(lfo1Rate.max(0.001), 0, 0.5).linlin(0, 1, -1, 1)
-]);
-
-lfo1 = lfoShapeSel * lfo1Depth.clip(0, 1) * lfo1On.clip(0, 1);
-
-lfo2ShapeSel = Select.kr(lfo2Shape.clip(0, 3), [
-	SinOsc.kr(lfo2Rate.max(0.001)),
-	LFTri.kr(lfo2Rate.max(0.001)),
-	LFSaw.kr(lfo2Rate.max(0.001)),
-	LFPulse.kr(lfo2Rate.max(0.001), 0, 0.5).linlin(0, 1, -1, 1)
-]);
-
-lfo2 = lfo2ShapeSel * lfo2Depth.clip(0, 1) * lfo2On.clip(0, 1);
-
-modEnv1 = EnvGen.kr(
-	Env.adsr(
-		modEnv1Atk.max(0.001),
-		modEnv1Dec.max(0.001),
-		modEnv1Sus.clip(0, 1),
-		modEnv1Rel.max(0.001)
-	),
-	gate
-) * modEnv1Depth.clip(0, 1);
-
-
-modEnv2 = EnvGen.kr(
-	Env.adsr(
-		modEnv2Atk.max(0.001),
-		modEnv2Dec.max(0.001),
-		modEnv2Sus.clip(0, 1),
-		modEnv2Rel.max(0.001)
-	),
-	gate
-) * modEnv2Depth.clip(0, 1);
-
-modAPos = 0.0;
-modBPos = 0.0;
-modF1Cutoff = 0.0;
-modF2Cutoff = 0.0;
-modDelayMix = 0.0;
-modADensity = 0.0;
-modBDensity = 0.0;
-modAScanWidth = 0.0;
-modBScanWidth = 0.0;
-modOscCutoff = 0.0;
-modMasterAmp = 0.0;
-
-modEnv1APos = 0.0;
-modEnv1BPos = 0.0;
-modEnv1F1Cutoff = 0.0;
-modEnv1F2Cutoff = 0.0;
-modEnv1DelayMix = 0.0;
-modEnv1ADensity = 0.0;
-modEnv1BDensity = 0.0;
-modEnv1AScanWidth = 0.0;
-modEnv1BScanWidth = 0.0;
-modEnv1OscCutoff = 0.0;
-modEnv1MasterAmp = 0.0;
-
-modEnv2APos = 0.0;
-modEnv2BPos = 0.0;
-modEnv2F1Cutoff = 0.0;
-modEnv2F2Cutoff = 0.0;
-modEnv2DelayMix = 0.0;
-modEnv2ADensity = 0.0;
-modEnv2BDensity = 0.0;
-modEnv2AScanWidth = 0.0;
-modEnv2BScanWidth = 0.0;
-modEnv2OscCutoff = 0.0;
-modEnv2MasterAmp = 0.0;
-
-destApply = { |src, dest, amt|
-	var val = src * amt.clip(-1, 1);
-
-	if(dest == 0)  { modAPos = modAPos + val };
-	if(dest == 1)  { modBPos = modBPos + val };
-	if(dest == 2)  { modF1Cutoff = modF1Cutoff + val };
-	if(dest == 3)  { modF2Cutoff = modF2Cutoff + val };
-	if(dest == 4)  { modDelayMix = modDelayMix + val };
-	if(dest == 5)  { modADensity = modADensity + val };
-	if(dest == 6)  { modBDensity = modBDensity + val };
-	if(dest == 7)  { modAScanWidth = modAScanWidth + val };
-	if(dest == 8)  { modBScanWidth = modBScanWidth + val };
-	if(dest == 9)  { modOscCutoff = modOscCutoff + val };
-	if(dest == 10) { modMasterAmp = modMasterAmp + val };
-};
-
-destApplyEnv = { |dest, amt|
-	var val = modEnv1 * amt.clip(-1, 1);
-
-	if(dest == 0)  { modEnv1APos = modEnv1APos + val };
-	if(dest == 1)  { modEnv1BPos = modEnv1BPos + val };
-	if(dest == 2)  { modEnv1F1Cutoff = modEnv1F1Cutoff + val };
-	if(dest == 3)  { modEnv1F2Cutoff = modEnv1F2Cutoff + val };
-	if(dest == 4)  { modEnv1DelayMix = modEnv1DelayMix + val };
-	if(dest == 5)  { modEnv1ADensity = modEnv1ADensity + val };
-	if(dest == 6)  { modEnv1BDensity = modEnv1BDensity + val };
-	if(dest == 7)  { modEnv1AScanWidth = modEnv1AScanWidth + val };
-	if(dest == 8)  { modEnv1BScanWidth = modEnv1BScanWidth + val };
-	if(dest == 9)  { modEnv1OscCutoff = modEnv1OscCutoff + val };
-	if(dest == 10) { modEnv1MasterAmp = modEnv1MasterAmp + val };
-};
-
-destApplyEnv2 = { |dest, amt|
-	var val = modEnv2 * amt.clip(-1, 1);
-
-	if(dest == 0)  { modEnv2APos = modEnv2APos + val };
-	if(dest == 1)  { modEnv2BPos = modEnv2BPos + val };
-	if(dest == 2)  { modEnv2F1Cutoff = modEnv2F1Cutoff + val };
-	if(dest == 3)  { modEnv2F2Cutoff = modEnv2F2Cutoff + val };
-	if(dest == 4)  { modEnv2DelayMix = modEnv2DelayMix + val };
-	if(dest == 5)  { modEnv2ADensity = modEnv2ADensity + val };
-	if(dest == 6)  { modEnv2BDensity = modEnv2BDensity + val };
-	if(dest == 7)  { modEnv2AScanWidth = modEnv2AScanWidth + val };
-	if(dest == 8)  { modEnv2BScanWidth = modEnv2BScanWidth + val };
-	if(dest == 9)  { modEnv2OscCutoff = modEnv2OscCutoff + val };
-	if(dest == 10) { modEnv2MasterAmp = modEnv2MasterAmp + val };
-};
-
-destApply.value(lfo1, lfo1Dest1, lfo1Amt1);
-destApply.value(lfo1, lfo1Dest2, lfo1Amt2);
-destApply.value(lfo1, lfo1Dest3, lfo1Amt3);
-destApply.value(lfo1, lfo1Dest4, lfo1Amt4);
-
-destApply.value(lfo2, lfo2Dest1, lfo2Amt1);
-destApply.value(lfo2, lfo2Dest2, lfo2Amt2);
-destApply.value(lfo2, lfo2Dest3, lfo2Amt3);
-destApply.value(lfo2, lfo2Dest4, lfo2Amt4);
-
-destApplyEnv.value(modEnv1Dest1, modEnv1Amt1);
-destApplyEnv.value(modEnv1Dest2, modEnv1Amt2);
-destApplyEnv.value(modEnv1Dest3, modEnv1Amt3);
-destApplyEnv.value(modEnv1Dest4, modEnv1Amt4);
-
-destApplyEnv2.value(modEnv2Dest1, modEnv2Amt1);
-destApplyEnv2.value(modEnv2Dest2, modEnv2Amt2);
-destApplyEnv2.value(modEnv2Dest3, modEnv2Amt3);
-destApplyEnv2.value(modEnv2Dest4, modEnv2Amt4);
-
-aBasePosNorm = Select.kr(
-	freezeLockA.clip(0, 1),
-	[
-		(aPosition + modAPos + modEnv1APos + modEnv2APos).clip(0, 1),
-		freezePosA.clip(0, 1)
-	]
-);
-
-bBasePosNorm = Select.kr(
-	freezeLockB.clip(0, 1),
-	[
-		(bPosition + modBPos + modEnv1BPos + modEnv2BPos).clip(0, 1),
-		freezePosB.clip(0, 1)
-	]
-);
-
-aDensityMod = (aDensity * (modADensity + modEnv1ADensity + modEnv2ADensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
-bDensityMod = (bDensity * (modBDensity + modEnv1BDensity + modEnv2BDensity).linexp(-1, 1, 0.25, 4.0)).clip(0.1, 120);
-
-aScanWidthMod = (aScanWidth + ((modAScanWidth + modEnv1AScanWidth + modEnv2AScanWidth) * 0.5)).clip(0, 1);
-bScanWidthMod = (bScanWidth + ((modBScanWidth + modEnv1BScanWidth + modEnv2BScanWidth) * 0.5)).clip(0, 1);
-
-oscCutoffMod = (
-	oscCutoff * (modOscCutoff + modEnv1OscCutoff + modEnv2OscCutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-).clip(80, 18000);
-
-masterAmpMod = (
-	masterAmp * (modMasterAmp + modEnv1MasterAmp + modEnv2MasterAmp).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-).clip(0, 1);
-
-
-
-		// ---------------- Gran A ----------------
-	trigA = Dust.kr(aDensityMod.max(0.1));
-
-// mode 0 = Center
-// mode 1 = Forward
-// mode 2 = PingPong
-scanA = SinOsc.kr(aScanRate.max(0.001), 0, aScanWidthMod.clip(0, 1));
-aCenterPos = (aBasePosNorm + scanA).clip(0, 1);
-aForwardPos = Wrap.kr(
-		aBasePosNorm + ((LFSaw.kr(aScanRate.max(0.001), 1) * 0.5) + 0.5) * aScanWidthMod.clip(0, 1),
-	0, 1
-);
-aForwardPos = aForwardPos.clip(0, 1);
-
-aPingPongPos = (
-	aBasePosNorm
-		+ (LFTri.kr(aScanRate.max(0.001), 0) * aScanWidthMod.clip(0, 1))
-).clip(0, 1);
-
-posA = Select.kr(aScanMode.clip(0, 2), [
-	aCenterPos,
-	aForwardPos,
-	aPingPongPos
-]);
-
-posA = (posA + TRand.kr(0 - aJitter.clip(0,1), aJitter.clip(0,1), trigA)).clip(0, 1);
-
-rateA = (ratioLag * aRateMul) + TRand.kr(0 - aRateRand, aRateRand, trigA);
-panA = TRand.kr(0 - aPanWidth.clip(0,1), aPanWidth.clip(0,1), trigA);
-
-		sigA = GrainBuf.ar(
-			numChannels: 2,
-			trigger: trigA,
-			dur: aDur.max(0.005),
-			sndbuf: playBufnum,
-			rate: rateA,
-			pos: ((loopStartSec + (posA * loopLen)) / bufDur).clip(0, 1),
-			interp: 4,
-			pan: panA
-		) * aAmp * aOn;
-
-		// ---------------- Gran B ----------------
-trigB = Dust.kr(bDensityMod.max(0.1));
-
-// mode 0 = Center
-// mode 1 = Forward
-// mode 2 = PingPong
-scanB = SinOsc.kr(bScanRate.max(0.001), 0, bScanWidthMod.clip(0, 1));
-bCenterPos = (bBasePosNorm + scanB).clip(0, 1);
-bForwardPos = Wrap.kr(
-		bBasePosNorm + ((LFSaw.kr(bScanRate.max(0.001), 1) * 0.5) + 0.5) * bScanWidthMod.clip(0, 1),
-	0, 1
-);
-bForwardPos = bForwardPos.clip(0, 1);
-
-bPingPongPos = (
-	bBasePosNorm
-		+ (LFTri.kr(bScanRate.max(0.001), 0) * bScanWidthMod.clip(0, 1))
-).clip(0, 1);
-
-posB = Select.kr(bScanMode.clip(0, 2), [
-	bCenterPos,
-	bForwardPos,
-	bPingPongPos
-]);
-
-posB = (posB + TRand.kr(0 - bJitter.clip(0,1), bJitter.clip(0,1), trigB)).clip(0, 1);
-
-rateB = (ratioLag * bRateMul) + TRand.kr(0 - bRateRand, bRateRand, trigB);
-panB = TRand.kr(0 - bPanWidth.clip(0,1), bPanWidth.clip(0,1), trigB);
-
-		sigB = GrainBuf.ar(
-			numChannels: 2,
-			trigger: trigB,
-			dur: bDur.max(0.005),
-			sndbuf: playBufnum,
-			rate: rateB,
-			pos: ((loopStartSec + (posB * loopLen)) / bufDur).clip(0, 1),
-			interp: 4,
-			pan: panB
-		) * bAmp * bOn;
-
-		// ---------------- Osc Layer ----------------
-		freq = (60.midicps * ratioLag) * (2 ** (oscDetune / 12));
-
-		osc = Select.ar(oscWave.clip(0, 3), [
-			SinOsc.ar(freq),
-			Saw.ar(freq),
-			Pulse.ar(freq, 0.45),
-			LFTri.ar(freq)
-		]);
-
-		osc = RLPF.ar(
-			osc ! 2,
-			oscCutoffMod.clip(80, 18000),
-			(1 - oscRes.clip(0, 0.98)).max(0.02)
-		) * oscAmp * oscOn;
-
-		rawSig = sigA + sigB + osc;
-
-		filt1Sig = applyFilter.value(
-			rawSig,
-			filter1Type,
-			(
-				filter1Cutoff
-				* (modF1Cutoff + modEnv1F1Cutoff + modEnv2F1Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-			).clip(20, 20000),
-			filt1RQ
-		);
-
-
-				filt2Sig = applyFilter.value(
-			rawSig,
-			filter2Type,
-			(
-				filter2Cutoff
-				* (modF2Cutoff + modEnv1F2Cutoff + modEnv2F2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-			).clip(20, 20000),
-			filt2RQ
-		);
-
-				seriesSig = applyFilter.value(
-	filt1Sig,
-	filter2Type,
-	(
-		filter2Cutoff
-		* (modF2Cutoff + modEnv1F2Cutoff + modEnv2F2Cutoff).clip(-1, 1).linexp(-1, 1, 0.25, 4.0)
-	).clip(20, 20000),
-	filt2RQ
-);
-
-		parallelSig = (filt1Sig + filt2Sig) * 0.5;
-
-			sig = SelectX.ar(filterRouting.clip(0, 1), [
-			seriesSig,
-			parallelSig
-		]);
-
-				// ---------------- FX Order ----------------
-		// fxOrder: 0 = Delay -> Reverb
-		//          1 = Reverb -> Delay
-
-		delayInput = sig;
-
-		delaySig = CombC.ar(
-			delayInput,
-			1.5,
-			delayTime.clip(0.01, 1.5),
-			(delayFb.clip(0.001, 0.95) * 6.0).clip(0.001, 6.0)
-		);
-
-		wetDelaySig = (delayInput * 0.7) + (delaySig * 0.7);
-
-		delayOut = SelectX.ar(
-			(
-				(delayMix + ((modDelayMix + modEnv1DelayMix + modEnv2DelayMix) * 0.5)).clip(0, 1)
-				* delayOn.clip(0, 1)
-			),
-			[
-				delayInput,
-				wetDelaySig
-			]
-		);
-
-
-
-		sig = SelectX.ar(
-			fxOrder.clip(0, 1),
-			[
-				// 0 = Delay -> Reverb
-				FreeVerb2.ar(
-					delayOut[0],
-					delayOut[1],
-					reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
-					reverbRoom.clip(0, 1),
-					reverbDamp.clip(0, 1)
-				),
-
-				// 1 = Reverb -> Delay
-				{
-					var revFirst, delAfter, wetAfter;
-					revFirst = FreeVerb2.ar(
-						sig[0],
-						sig[1],
-						reverbMix.clip(0, 1) * reverbOn.clip(0, 1),
-						reverbRoom.clip(0, 1),
-						reverbDamp.clip(0, 1)
-					);
-
-					delAfter = CombC.ar(
-						revFirst,
-						1.5,
-						delayTime.clip(0.01, 1.5),
-						(delayFb.clip(0.001, 0.95) * 6.0).clip(0.001, 6.0)
-					);
-
-					wetAfter = (revFirst * 0.7) + (delAfter * 0.7);
-
-					SelectX.ar(
-	(
-		(delayMix + ((modDelayMix + modEnv1DelayMix + modEnv2DelayMix) * 0.5)).clip(0, 1)
-		* delayOn.clip(0, 1)
-	),
-	[
-		revFirst,
-		wetAfter
-	]
-)
-				}.value
-			]
-		);
-
-		sig = HPF.ar(sig, hpf.clip(20, 18000));
-sig = LPF.ar(sig, lpf.clip(50, 20000));
-
-env = EnvGen.kr(
-	Env.asr(atk.max(0.001), 1.0, rel.max(0.001)),
-	gate,
-	doneAction: 2
-);
-
-Out.ar(out, sig * masterAmpMod * env);
-	}).add;
-
-	SynthDef(\granInputRecorderV21, { |bufnum=0, in=0, recLevel=1.0, preLevel=0.0, run=1, loop=0|
-		var sig;
-		sig = SoundIn.ar(in);
-		RecordBuf.ar(sig, bufnum, offset: 0, recLevel: recLevel, preLevel: preLevel, run: run, loop: loop, doneAction: 2);
-	}).add;
-
-	s.sync;
-
-	// --------------------------------------------------------
-	// helpers
-	// --------------------------------------------------------
-	~granV21[\voiceArgs] = { |note|
-		var p = ~granV21[\params];
-		var ratio = (note - p[\rootMidi]).midiratio;
-
-		[
-			\bufnum, (~granV21[\buf] ? 0),
-			\masterAmp, p[\masterAmp],
-			\pitchRatio, ratio,
-			\glide, p[\glide],
-
-			\regionStart, p[\regionStart],
-\regionEnd, p[\regionEnd],
-\loopStart, (~granV21[\view][\loopStart] ? 0.0),
-\loopEnd, (~granV21[\view][\loopEnd] ? 1.0),
-\aPosition, p[\aPosition],
-\bPosition, p[\bPosition],
-\freezeOn, p[\freezeOn],
-\freezeLockA, p[\freezeLockA],
-\freezeLockB, p[\freezeLockB],
-\freezePosA, p[\freezePosA],
-\freezePosB, p[\freezePosB],
-\freezeBufnum, (~granV21[\freezeBuf] ? 0),
-\freezeLoopStart, 0.0,
-\freezeLoopEnd, (~granV21[\freezeCapturedFrac] ? 1.0),
-
-			\aOn, p[\aOn], \aAmp, p[\aAmp], \aDensity, p[\aDensity], \aDur, p[\aDur],
-			\aJitter, p[\aJitter], \aRateMul, p[\aRateMul], \aRateRand, p[\aRateRand],
-\aScanRate, p[\aScanRate], \aScanWidth, p[\aScanWidth], \aScanMode, p[\aScanMode], \aPanWidth, p[\aPanWidth],
-
-			\bOn, p[\bOn], \bAmp, p[\bAmp], \bDensity, p[\bDensity], \bDur, p[\bDur],
-			\bJitter, p[\bJitter], \bRateMul, p[\bRateMul], \bRateRand, p[\bRateRand],
-\bScanRate, p[\bScanRate], \bScanWidth, p[\bScanWidth], \bScanMode, p[\bScanMode], \bPanWidth, p[\bPanWidth],
-
-			\oscOn, p[\oscOn], \oscAmp, p[\oscAmp], \oscWave, p[\oscWave],
-			\oscDetune, p[\oscDetune], \oscCutoff, p[\oscCutoff], \oscRes, p[\oscRes],
-
-			\filter1Type, p[\filter1Type],
-			\filter1Cutoff, p[\filter1Cutoff],
-			\filter1Res, p[\filter1Res],
-
-			\filter2Type, p[\filter2Type],
-			\filter2Cutoff, p[\filter2Cutoff],
-			\filter2Res, p[\filter2Res],
-
-			\filterRouting, p[\filterRouting],
-
-			\delayOn, p[\delayOn],
-			\delayMix, p[\delayMix],
-			\delayTime, p[\delayTime],
-			\delayFb, p[\delayFb],
-
-			\reverbOn, p[\reverbOn],
-			\reverbMix, p[\reverbMix],
-			\reverbRoom, p[\reverbRoom],
-			\reverbDamp, p[\reverbDamp],
-			\fxOrder, p[\fxOrder],
-
-			\lfo1On, p[\lfo1On],
-			\lfo1Rate, p[\lfo1Rate],
-			\lfo1Depth, p[\lfo1Depth],
-			\lfo1Shape, p[\lfo1Shape],
-
-			\lfo1Dest1, p[\lfo1Dest1],
-			\lfo1Amt1, p[\lfo1Amt1],
-			\lfo1Dest2, p[\lfo1Dest2],
-			\lfo1Amt2, p[\lfo1Amt2],
-			\lfo1Dest3, p[\lfo1Dest3],
-			\lfo1Amt3, p[\lfo1Amt3],
-			\lfo1Dest4, p[\lfo1Dest4],
-			\lfo1Amt4, p[\lfo1Amt4],
-
-			\lfo2On, p[\lfo2On],
-			\lfo2Rate, p[\lfo2Rate],
-			\lfo2Depth, p[\lfo2Depth],
-			\lfo2Shape, p[\lfo2Shape],
-
-			\lfo2Dest1, p[\lfo2Dest1],
-			\lfo2Amt1, p[\lfo2Amt1],
-			\lfo2Dest2, p[\lfo2Dest2],
-			\lfo2Amt2, p[\lfo2Amt2],
-			\lfo2Dest3, p[\lfo2Dest3],
-			\lfo2Amt3, p[\lfo2Amt3],
-			\lfo2Dest4, p[\lfo2Dest4],
-			\lfo2Amt4, p[\lfo2Amt4],
-
-			\modEnv1Atk, p[\modEnv1Atk],
-			\modEnv1Dec, p[\modEnv1Dec],
-			\modEnv1Sus, p[\modEnv1Sus],
-			\modEnv1Rel, p[\modEnv1Rel],
-			\modEnv1Depth, p[\modEnv1Depth],
-
-			\modEnv1Dest1, p[\modEnv1Dest1],
-			\modEnv1Amt1, p[\modEnv1Amt1],
-			\modEnv1Dest2, p[\modEnv1Dest2],
-			\modEnv1Amt2, p[\modEnv1Amt2],
-			\modEnv1Dest3, p[\modEnv1Dest3],
-			\modEnv1Amt3, p[\modEnv1Amt3],
-			\modEnv1Dest4, p[\modEnv1Dest4],
-			\modEnv1Amt4, p[\modEnv1Amt4],
-
-			\modEnv2Atk, p[\modEnv2Atk],
-			\modEnv2Dec, p[\modEnv2Dec],
-			\modEnv2Sus, p[\modEnv2Sus],
-			\modEnv2Rel, p[\modEnv2Rel],
-			\modEnv2Depth, p[\modEnv2Depth],
-
-			\modEnv2Dest1, p[\modEnv2Dest1],
-			\modEnv2Amt1, p[\modEnv2Amt1],
-			\modEnv2Dest2, p[\modEnv2Dest2],
-			\modEnv2Amt2, p[\modEnv2Amt2],
-			\modEnv2Dest3, p[\modEnv2Dest3],
-			\modEnv2Amt3, p[\modEnv2Amt3],
-			\modEnv2Dest4, p[\modEnv2Dest4],
-			\modEnv2Amt4, p[\modEnv2Amt4],
-
-
-			\hpf, p[\hpf], \lpf, p[\lpf], \atk, p[\atk], \rel, p[\rel]
-		]
-	};
-
-~granV21[\updateAllVoices] = {
-	~granV21[\voices].keysValuesDo { |note, sy|
-		if(sy.notNil) {
-			sy.set(*~granV21[\voiceArgs].value(note));
-		};
-	};
-
-	if(~granV21[\previewSynth].notNil) {
-		~granV21[\previewSynth].set(*~granV21[\voiceArgs].value(~granV21[\previewNote]));
-	};
-
-	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-	if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
-};
-
-	~granV21[\noteOn] = { |note, vel=100|
-		var sy;
-
-		if(~granV21[\buf].isNil) {
-			"No sample or live buffer loaded.".warn;
-			^nil;
-		};
-
-		if(~granV21[\voices][note].notNil) {
-			try { ~granV21[\voices][note].set(\gate, 0) } { };
-			~granV21[\voices].removeAt(note);
-		};
-
-		sy = Synth(\granVoiceV21, ~granV21[\voiceArgs].value(note));
-		~granV21[\voices][note] = sy;
-	};
-
-	~granV21[\noteOff] = { |note|
-		var sy = ~granV21[\voices][note];
-		if(sy.notNil) {
-			try { sy.set(\gate, 0) } { };
-			~granV21[\voices].removeAt(note);
-		};
-	};
-
-	~granV21[\panic] = {
-	~granV21[\voices].keysValuesDo { |note, sy|
-		try { sy.set(\gate, 0) } { };
-	};
-	~granV21[\voices].clear;
-
-	if(~granV21[\previewSynth].notNil) {
-		try { ~granV21[\previewSynth].set(\gate, 0) } { };
-		~granV21[\previewSynth] = nil;
-	};
-
-	~granV21[\isPreviewing] = false;
-};
-
-	~granV21[\allocLiveBuf] = {
-		var frames = (s.sampleRate * ~granV21[\recordSeconds]).asInteger.max(44100);
-		if(~granV21[\liveBuf].notNil) {
-			try { ~granV21[\liveBuf].free } { };
-		};
-		~granV21[\liveBuf] = Buffer.alloc(s, frames, 1);
-	};
-
-
-
-~granV21[\allocFreezeBuf] = {
-	var frames = (s.sampleRate * (~granV21[\recordSeconds] ? 8.0)).asInteger.max(44100);
-
-	if(~granV21[\freezeBuf].notNil) {
-		try { ~granV21[\freezeBuf].free } { };
-	};
-
-	~granV21[\freezeBuf] = Buffer.alloc(s, frames, 1);
-};
-
-
-		~granV21[\captureBufToFreeze] = { |srcBuf|
-	var p = ~granV21[\params];
-	var v = ~granV21[\view];
-	var srcFrames, loopStartFrame, loopEndFrame, copyFrames;
-
-	if(srcBuf.isNil) {
-		"No source buffer available for freeze capture.".warn;
-		^nil;
-	};
-
-	if(~granV21[\freezeBuf].isNil) {
-		~granV21[\allocFreezeBuf].value;
-	};
-
-	srcFrames = srcBuf.numFrames;
-
-	loopStartFrame = (((v[\loopStart] ? p[\regionStart]).clip(0, 1)) * srcFrames).asInteger;
-	loopEndFrame = (((v[\loopEnd] ? p[\regionEnd]).clip(0, 1)) * srcFrames).asInteger;
-
-	copyFrames = (loopEndFrame - loopStartFrame).max(1);
-	copyFrames = copyFrames.min(~granV21[\freezeBuf].numFrames);
-
-	~granV21[\freezeCapturedFrac] = (
-		copyFrames / (~granV21[\freezeBuf].numFrames.max(1))
-	).clip(0.001, 1.0);
-
-	~granV21[\freezeBuf].zero;
-
-	srcBuf.copyData(
-		~granV21[\freezeBuf],
-		dstStartAt: 0,
-		srcStartAt: loopStartFrame,
-		numSamples: copyFrames
-	);
-
-	s.sync;
-
-	~granV21[\params][\freezePosA] = ~granV21[\params][\aPosition].clip(0, 1);
-	~granV21[\params][\freezePosB] = ~granV21[\params][\bPosition].clip(0, 1);
-
-	~granV21[\updateAllVoices].value;
-	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-};
-
-
-
-~granV21[\captureCurrentToFreeze] = {
-	if(~granV21[\buf].isNil) {
-		"No current buffer to freeze.".warn;
-		^nil;
-	};
-
-	~granV21[\captureBufToFreeze].value(~granV21[\buf]);
-};
-
-
-
-~granV21[\captureLiveToFreeze] = {
-	if(~granV21[\liveBuf].isNil) {
-		"No live buffer to freeze.".warn;
-		^nil;
-	};
-
-	~granV21[\captureBufToFreeze].value(~granV21[\liveBuf]);
-};
-
-
-
-
-		~granV21[\toggleFreeze] = {
-	var p = ~granV21[\params];
-
-	if(p[\freezeOn] == 0) {
-		if(~granV21[\freezeBuf].isNil) {
-			~granV21[\allocFreezeBuf].value;
-		};
-
-		if(p[\freezeSourceMode] == 1) {
-			~granV21[\captureLiveToFreeze].value;
-		} {
-			~granV21[\captureCurrentToFreeze].value;
-		};
-
-		p[\freezeOn] = 1;
-	} {
-		p[\freezeOn] = 0;
-	};
-
-	~granV21[\syncControls].value;
-	~granV21[\refreshWaveData].value;
-~granV21[\updateAllVoices].value;
-if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-
-	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-};
-
-
-
-~granV21[\setCurrentBuffer] = { |buf, label|
-	if(buf.isNil) {
-		"setCurrentBuffer got nil buffer.".warn;
-		^nil;
-	};
-
-
-
-
-
-
-	// stop anything currently sounding before swapping buffers
-	~granV21[\panic].value;
-	~granV21[\isPreviewing] = false;
-
-	~granV21[\buf] = buf;
-
-	~granV21[\samplePath] = label ? "Untitled";
-	~granV21[\params][\regionStart] = 0.0;
-~granV21[\params][\regionEnd] = 1.0;
-~granV21[\params][\aPosition] = 0.5;
-~granV21[\params][\bPosition] = 0.5;
-
-		~granV21[\view][\loopStart] = 0.0;
-		~granV21[\view][\loopEnd] = 1.0;
-
-	~granV21[\grainDotsA].clear;
-	~granV21[\grainDotsB].clear;
-
-	{
-		if(~granV21[\pathLabel].notNil) {
-			~granV21[\pathLabel].string_(~granV21[\samplePath]);
-			~granV21[\pathLabel].refresh;
-		};
-
-		if(~granV21[\playButton].notNil) {
-			~granV21[\playButton].value_(0);
-			~granV21[\playButton].refresh;
-		};
-
-		~granV21[\refreshWaveData].value;
-		~granV21[\updateAllVoices].value;
-
-		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-if(~granV21[\win].notNil) { ~granV21[\win].refresh };
-	}.defer;
-};
-
-
-
-~granV21[\refreshWaveData] = {
-	var b = ~granV21[\buf];
-
-		b = if((~granV21[\params][\freezeOn] ? 0) == 1) {
-		~granV21[\freezeBuf]
-	} {
-		~granV21[\buf]
-	};
-
-	if(b.isNil) {
-		~granV21[\waveData] = FloatArray.newClear(0);
-		{
-			if(~granV21[\waveView].notNil) {
-	~granV21[\waveView].refresh;
-};
-if(~granV21[\miniView].notNil) {
-	~granV21[\miniView].refresh;
-};
-		}.defer;
-		^nil;
-	};
-
-	b.loadToFloatArray(action: { |arr|
-		var targetSize, step, reduced, maxPeak;
-
-		targetSize = 2200;
-
-		if(arr.notNil and: { arr.size > 0 }) {
-			step = (arr.size / targetSize).max(1).asInteger;
-			reduced = FloatArray.newClear((arr.size / step).ceil.asInteger);
-
-			reduced.size.do { |i|
-				var startIdx = i * step;
-				var endIdx = (startIdx + step - 1).clip(startIdx, arr.size - 1);
-				var peak = 0.0;
-
-				startIdx.to(endIdx).do { |j|
-					var v = arr[j].abs;
-					if(v > peak) { peak = v };
-				};
-
-				reduced[i] = peak;
-			};
-
-			maxPeak = reduced.maxItem ? 0.0;
-
-			if(maxPeak > 0.000001) {
-				reduced = reduced.collect { |v| (v / maxPeak).clip(0, 1) };
-			};
-
-			~granV21[\waveData] = reduced;
-			("Waveform loaded: " ++ reduced.size ++ " points | maxPeak=" ++ maxPeak).postln;
-		} {
-			~granV21[\waveData] = FloatArray.newClear(0);
-		};
-
-		{
-	if(~granV21[\waveView].notNil) {
-		~granV21[\waveView].refresh;
-	};
-	if(~granV21[\miniView].notNil) {
-		~granV21[\miniView].refresh;
-	};
-}.defer;
-	});
-};
-
-
-
-
-
-~granV21[\loadSample] = {
-	Dialog.openPanel({ |path|
-		if(path.isNil) {
-			"Load cancelled.".postln;
-			^nil;
-		};
-
-		path = path.asString.standardizePath;
-		("Loading sample: " ++ path).postln;
-
-			~granV21[\panic].value;
-
-		if(~granV21[\sampleBuf].notNil) {
-			try { ~granV21[\sampleBuf].free } { };
-			~granV21[\sampleBuf] = nil;
-		};
-
-		Buffer.readChannel(
-			s,
-			path,
-			channels: [0],
-			action: { |buf|
-				("Buffer.readChannel callback fired: " ++ buf).postln;
-					~granV21[\sampleBuf] = buf;
-				~granV21[\setCurrentBuffer].value(
-					buf,
-					PathName(path).fileName
-				);
-				("Sample loaded: " ++ PathName(path).fileName).postln;
-			}
-		);
-	});
-};
-
-
-	~granV21[\startRecording] = {
-		if(~granV21[\liveBuf].isNil) {
-			~granV21[\allocLiveBuf].value;
-		};
-
-		if(~granV21[\recSynth].notNil) {
-			try { ~granV21[\recSynth].free } { };
-		};
-
-		~granV21[\liveBuf].zero;
-		~granV21[\recSynth] = Synth(\granInputRecorderV21, [
-			\bufnum, ~granV21[\liveBuf],
-			\in, 0,
-			\recLevel, 1.0,
-			\preLevel, 0.0,
-			\run, 1,
-			\loop, 0
-		]);
-
-		~granV21[\isRecording] = true;
-	};
-
-	~granV21[\stopRecording] = {
-		if(~granV21[\recSynth].notNil) {
-			try { ~granV21[\recSynth].free } { };
-			~granV21[\recSynth] = nil;
-		};
-
-		~granV21[\isRecording] = false;
-
-		AppClock.sched(0.2, {
-			~granV21[\setCurrentBuffer].value(~granV21[\liveBuf], "Live Recording");
+	~lemonV3 = IdentityDictionary.new;
+	app = ~lemonV3;
+	app[\schemaVersion] = 3;
+	app[\maxVoices] = 4;
+	app[\voiceSerial] = 0;
+	app[\droneKey] = \autoDroneVoice;
+	app[\selectedGran] = 1;
+	app[\selectedModTarget] = \gr1Position;
+	app[\learnSlotIndex] = nil;
+	app[\midiClockCount] = 0;
+	app[\midiClockStart] = nil;
+	app[\waveData] = FloatArray.newClear(0);
+	app[\midiObjs] = List.new;
+	app[\voices] = IdentityDictionary.new;
+	app[\ccValues] = Array.fill(128, 0.0);
+	app[\polyAftertouch] = IdentityDictionary.new;
+	app[\pages] = List.new;
+	app[\tabButtons] = List.new;
+	app[\sliders] = IdentityDictionary.new;
+	app[\sliderSpecs] = IdentityDictionary.new;
+	app[\boxes] = IdentityDictionary.new;
+	app[\toggles] = IdentityDictionary.new;
+	app[\menus] = IdentityDictionary.new;
+	app[\labels] = IdentityDictionary.new;
+	app[\modIndicators] = IdentityDictionary.new;
+	app[\seqStepControls] = List.new;
+	app[\seqStepLabels] = List.new;
+	app[\seqGuiPhase] = 0.0;
+	app[\seqGuiStep] = nil;
+	app[\seqGuiOffset] = 0;
+	app[\grainDots1] = List.new;
+	app[\grainDots2] = List.new;
+	app[\visTime] = 0.0;
+	app[\visRunning] = false;
+	app[\presetStatus] = "Preset: V3 initialized";
+	app[\deferGui] = { |func|
+		AppClock.sched(0, {
+			if(app.notNil and: { app[\win].notNil }) { func.value };
 			nil
 		});
 	};
 
-	~granV21[\previewOn] = {
-	if(~granV21[\buf].isNil) {
-		"No sample or live buffer loaded.".warn;
-		^nil;
-	};
+	sourceItems = ["File", "Live History"];
+	waveItems = ["Sine", "Saw", "Pulse", "Triangle", "Noise"];
+	filterItems = ["Bypass", "Lowpass", "Highpass", "Bandpass", "Notch"];
+	fx1Items = ["Off", "Flanger+Dist", "Chorus", "Phaser"];
+	fx2Items = ["Off", "Delay", "Reverb", "Delay + Reverb"];
+	lfoShapeItems = ["Saw", "Rev Saw", "Triangle", "Pos Tri", "Sine", "Pos Sine", "Square", "Pos Square", "Random"];
+	syncDivItems = ["1/16", "1/8", "1/4", "1/2", "1 Bar", "2 Bars", "4 Bars"];
+	modSourceItems = ["Off", "ENV1", "ENV2", "LFO1", "LFO2", "SEQ", "X", "Y", "Velocity", "Mod Wheel", "Aftertouch", "Pitch Bend", "CC"];
 
-	if(~granV21[\previewSynth].notNil) {
-		try { ~granV21[\previewSynth].set(\gate, 0) } { };
-		~granV21[\previewSynth] = nil;
-	};
+	app[\modTargets] = [
+		\gr1Position, \gr2Position,
+		\gr1Density, \gr2Density,
+		\gr1GrainSize, \gr2GrainSize,
+		\gr1Pitch, \gr2Pitch,
+		\gr1Amp, \gr2Amp,
+		\oscAmp, \oscPitch, \oscCutoff,
+		\filter1Cutoff, \filter2Cutoff,
+		\fx1Mix, \delayMix, \reverbMix,
+		\masterAmp, \gr1PanRand, \gr2PanRand,
+		\seqDepth
+	];
+	app[\modTargetLabels] = [
+		"GR1 Position", "GR2 Position",
+		"GR1 Density", "GR2 Density",
+		"GR1 Grain Size", "GR2 Grain Size",
+		"GR1 Pitch", "GR2 Pitch",
+		"GR1 Level", "GR2 Level",
+		"OSC Level", "OSC Pitch", "OSC Cutoff",
+		"Filter 1 Cutoff", "Filter 2 Cutoff",
+		"FX1 Mix", "Delay Mix", "Reverb Mix",
+		"Master Level", "GR1 Pan Random", "GR2 Pan Random",
+		"SEQ Depth"
+	];
 
-	~granV21[\previewSynth] = Synth(
-		\granVoiceV21,
-		~granV21[\voiceArgs].value(~granV21[\previewNote])
+	modTargetCount = app[\modTargets].size;
+	slotCount = modTargetCount * 3;
+	app[\slotCount] = slotCount;
+
+	app[\params] = (
+		schemaVersion: 3,
+		masterAmp: 0.35,
+		rootMidi: 60,
+		glide: 0.03,
+		bpm: 120.0,
+		clockSource: 0,       // 0 internal, 1 MIDI clock follow
+		midiChannel: 0,       // 0 omni, 1-16 channels
+		bendRange: 2.0,
+		autoDrone: 1,
+		droneNote: 60,
+		droneVelocity: 100,
+		pitchBend: 0.0,
+		modWheel: 0.0,
+		aftertouch: 0.0,
+		sustainOn: 0,
+		xyX: 0.5,
+		xyY: 0.5,
+		xyXTarget: \gr1Position,
+		xyYTarget: \gr1Jitter,
+		grainDotsOn: 1,
+
+		gr1On: 1, gr1Source: 0, gr1Amp: 0.9, gr1Pitch: 0.0, gr1Detune: 0.0,
+		gr1Position: 0.5, gr1LivePosition: 0.85, gr1Density: 16.0, gr1GrainCount: 16,
+		gr1GrainSize: 0.11, gr1Window: 0.5, gr1Jitter: 0.04, gr1PanRand: 0.55,
+		gr1Rate: 1.0, gr1RateSync: 0, gr1RateDiv: 4, gr1PlayMode: 0, gr1LoopMode: 1,
+		gr1PreserveAttack: 0, gr1Pattern: 0, gr1RegionStart: 0.0, gr1RegionEnd: 1.0,
+		gr1LoopStart: 0.0, gr1LoopEnd: 1.0,
+
+		gr2On: 1, gr2Source: 0, gr2Amp: 0.65, gr2Pitch: -12.0, gr2Detune: 0.0,
+		gr2Position: 0.5, gr2LivePosition: 0.75, gr2Density: 8.0, gr2GrainCount: 16,
+		gr2GrainSize: 0.20, gr2Window: 0.5, gr2Jitter: 0.08, gr2PanRand: 0.8,
+		gr2Rate: 0.5, gr2RateSync: 0, gr2RateDiv: 4, gr2PlayMode: 0, gr2LoopMode: 1,
+		gr2PreserveAttack: 0, gr2Pattern: 1, gr2RegionStart: 0.0, gr2RegionEnd: 1.0,
+		gr2LoopStart: 0.0, gr2LoopEnd: 1.0,
+
+		oscOn: 0, oscAmp: 0.18, oscWave: 0, oscPitch: 0.0, oscDetune: 0.0,
+		oscPulseWidth: 0.45, oscCutoff: 8000, oscRes: 0.15,
+
+		filter1Type: 1, filter1Cutoff: 12000, filter1Res: 0.15, filter1Width: 0.5,
+		filter2Type: 0, filter2Cutoff: 8000, filter2Res: 0.15, filter2Width: 0.5,
+		filterRouting: 0,
+
+		env1Atk: 0.01, env1Dec: 0.12, env1Sus: 0.8, env1Rel: 0.35, env1Vel: 0.35,
+		env2Atk: 0.01, env2Dec: 0.22, env2Sus: 0.0, env2Rel: 0.30, env2Depth: 0.5,
+
+		lfo1On: 0, lfo1Shape: 4, lfo1Rate: 0.35, lfo1Sync: 0, lfo1Div: 4, lfo1Depth: 0.25, lfo1Reset: 1,
+		lfo2On: 0, lfo2Shape: 2, lfo2Rate: 0.18, lfo2Sync: 0, lfo2Div: 5, lfo2Depth: 0.25, lfo2Reset: 1,
+
+		seqOn: 0, seqSteps: 16, seqRate: 4.0, seqSync: 1, seqDiv: 2, seqKeyTrig: 1, seqQuantize: 0, seqDepth: 0.5,
+
+		fx1Type: 0, fx1Mix: 0.35, fx1Rate: 0.25, fx1Depth: 0.55, fx1Drive: 0.25,
+		fx2Type: 1, fx2Order: 0, delayMix: 0.20, delayTime: 0.28, delaySync: 0, delayDiv: 3,
+		delayFb: 0.30, delayFilter: 9000, delayPingPong: 0,
+		reverbMix: 0.18, reverbPreDelay: 0.02, reverbDecay: 0.75, reverbDamp: 0.35,
+		liveInputToFx: 0.0, compressorAmt: 0.25, compressorOut: 1.0
 	);
 
-	~granV21[\isPreviewing] = true;
-if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-};
-
-	~granV21[\previewOff] = {
-	if(~granV21[\previewSynth].notNil) {
-		try { ~granV21[\previewSynth].set(\gate, 0) } { };
-		~granV21[\previewSynth] = nil;
+	32.do { |i|
+		app[\params][("seqStep" ++ (i + 1)).asSymbol] = if(i.even) { 0.35 } { -0.25 };
 	};
 
-	~granV21[\isPreviewing] = false;
-if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-
-	~granV21[\grainDotsA].clear;
-	~granV21[\grainDotsB].clear;
-
-	if(~granV21[\playButton].notNil) {
-		{
-			~granV21[\playButton].value_(0);
-			~granV21[\playButton].refresh;
-			if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-		}.defer;
-	};
-};
-
-	~granV21[\applyXYTarget] = { |target, value|
-	var p = ~granV21[\params];
-
-	switch(target,
-	\aPosition,  { p[\aPosition] = value.clip(0, 1) },
-	\bPosition,  { p[\bPosition] = value.clip(0, 1) },
-	\regionStart,{ p[\regionStart] = value.clip(0, p[\regionEnd] - 0.01) },
-	\regionEnd,  { p[\regionEnd] = value.clip(p[\regionStart] + 0.01, 1.0) },
-		\aJitter,    { p[\aJitter] = value.clip(0, 1) },
-		\bJitter,    { p[\bJitter] = value.clip(0, 1) },
-		\aDensity,   { p[\aDensity] = value.linexp(0, 1, 0.5, 80) },
-		\bDensity,   { p[\bDensity] = value.linexp(0, 1, 0.5, 80) },
-		\aScanWidth, { p[\aScanWidth] = value.clip(0, 1) },
-		\bScanWidth, { p[\bScanWidth] = value.clip(0, 1) },
-		\rateA,      { p[\aRateMul] = value.linlin(0, 1, -2, 2) },
-		\rateB,      { p[\bRateMul] = value.linlin(0, 1, -2, 2) },
-		\lpf,        { p[\lpf] = value.linexp(0, 1, 100, 20000) },
-		\hpf,        { p[\hpf] = value.linexp(0, 1, 20, 8000) },
-		\oscCutoff,  { p[\oscCutoff] = value.linexp(0, 1, 100, 18000) },
-		\masterAmp,  { p[\masterAmp] = value.clip(0, 1) }
+	app[\view] = (
+		zoom: 1.0,
+		scroll: 0.0,
+		editMode: \position,
+		waveSource: 0
 	);
 
-	~granV21[\syncControls].value;
-	~granV21[\updateAllVoices].value;
-};
+	app[\samplePaths] = (
+		gr1: nil,
+		gr2: nil
+	);
 
-	~granV21[\savePreset] = {
-		Dialog.savePanel({ |path|
-			if(path.notNil) {
-				~granV21[\params].copy.writeArchive(path);
+	app[\sampleLabels] = (
+		gr1: "GR1: Silent file buffer",
+		gr2: "GR2: Silent file buffer"
+	);
+
+	app[\makeDefaultSlots] = {
+		var slots = IdentityDictionary.new;
+		app[\modTargets].do { |target|
+			slots[target] = Array.fill(3, { (source: 0, amount: 0.0, cc: 1) });
+		};
+		slots
+	};
+	app[\modSlots] = app[\makeDefaultSlots].value;
+
+	// --------------------------------------------------------
+	// SynthDefs
+	// --------------------------------------------------------
+	SynthDef(\lemonLiveRecorderV3, { |bufnum=0, in=0, recLevel=1.0|
+		RecordBuf.ar(SoundIn.ar(in), bufnum, recLevel: recLevel, preLevel: 0.0, loop: 1);
+	}).add;
+
+	SynthDef(\lemonVoiceV3, {
+		|out=0, gate=1, gr1Bufnum=0, gr2Bufnum=0, liveBufnum=0,
+		masterAmp=0.35, rootRatio=1.0, glide=0.03, velocity=1.0, pitchBend=0.0, bendRange=2.0,
+		modWheel=0.0, aftertouch=0.0, xyX=0.5, xyY=0.5, bpm=120.0,
+
+		gr1On=1, gr1Source=0, gr1Amp=0.9, gr1Pitch=0.0, gr1Detune=0.0, gr1Position=0.5, gr1LivePosition=0.85,
+		gr1Density=16, gr1GrainCount=16, gr1GrainSize=0.11, gr1Window=0.5, gr1Jitter=0.04, gr1PanRand=0.55,
+		gr1Rate=1.0, gr1RateSync=0, gr1RateDiv=4, gr1PlayMode=0, gr1LoopMode=1, gr1PreserveAttack=0, gr1Pattern=0,
+		gr1RegionStart=0, gr1RegionEnd=1, gr1LoopStart=0, gr1LoopEnd=1,
+
+		gr2On=1, gr2Source=0, gr2Amp=0.65, gr2Pitch=(-12), gr2Detune=0.0, gr2Position=0.5, gr2LivePosition=0.75,
+		gr2Density=8, gr2GrainCount=16, gr2GrainSize=0.20, gr2Window=0.5, gr2Jitter=0.08, gr2PanRand=0.8,
+		gr2Rate=0.5, gr2RateSync=0, gr2RateDiv=4, gr2PlayMode=0, gr2LoopMode=1, gr2PreserveAttack=0, gr2Pattern=1,
+		gr2RegionStart=0, gr2RegionEnd=1, gr2LoopStart=0, gr2LoopEnd=1,
+
+		oscOn=0, oscAmp=0.18, oscWave=0, oscPitch=0, oscDetune=0, oscPulseWidth=0.45, oscCutoff=8000, oscRes=0.15,
+		filter1Type=1, filter1Cutoff=12000, filter1Res=0.15, filter1Width=0.5,
+		filter2Type=0, filter2Cutoff=8000, filter2Res=0.15, filter2Width=0.5, filterRouting=0,
+		env1Atk=0.01, env1Dec=0.12, env1Sus=0.8, env1Rel=0.35, env1Vel=0.35,
+		env2Atk=0.01, env2Dec=0.22, env2Sus=0.0, env2Rel=0.30, env2Depth=0.5,
+		lfo1On=0, lfo1Shape=4, lfo1Rate=0.35, lfo1Sync=0, lfo1Div=4, lfo1Depth=0.25, lfo1Reset=1,
+		lfo2On=0, lfo2Shape=2, lfo2Rate=0.18, lfo2Sync=0, lfo2Div=5, lfo2Depth=0.25, lfo2Reset=1,
+		seqOn=0, seqSteps=16, seqRate=4.0, seqSync=1, seqDiv=2, seqKeyTrig=1, seqQuantize=0, seqDepth=0.5,
+		fx1Type=0, fx1Mix=0.35, fx1Rate=0.25, fx1Depth=0.55, fx1Drive=0.25,
+		fx2Type=1, fx2Order=0, delayMix=0.20, delayTime=0.28, delaySync=0, delayDiv=3, delayFb=0.30, delayFilter=9000, delayPingPong=0,
+		reverbMix=0.18, reverbPreDelay=0.02, reverbDecay=0.75, reverbDamp=0.35,
+		liveInputToFx=0.0, compressorAmt=0.25, compressorOut=1.0|
+
+		var modSrc, modAmt, modCcVal, seqVals;
+		var env1, env2, velAmp, bendRatio, ratioLag;
+		var divBeats, lfoRate1, lfoRate2, seqRateHz, lfoPhase1, lfoPhase2;
+		var lfo1, lfo2, seqTrig, seqIndex, seqOffset, seqRaw, seq;
+		var sourceFor, modFor, applyFilter, makeGrain;
+		var gr1, gr2, oscFreq, osc, raw, f1, f2, series, parallel, sig;
+		var fx1Wet, fx2Wet, fx2Dry, delTime, liveFx;
+		var delayStage, reverbStage, delayOnly, reverbOnly, delayThenReverb, reverbThenDelay;
+		var threshold;
+
+		modSrc = NamedControl.kr(\modSrc, Array.fill(66, 0));
+		modAmt = NamedControl.kr(\modAmt, Array.fill(66, 0));
+		modCcVal = NamedControl.kr(\modCcVal, Array.fill(66, 0));
+		seqVals = NamedControl.kr(\seqVals, Array.fill(32, 0));
+
+		divBeats = Select.kr(lfo1Div.clip(0, 6), [0.25, 0.5, 1, 2, 4, 8, 16]);
+		lfoRate1 = Select.kr(lfo1Sync.clip(0, 1), [lfo1Rate.max(0.001), (bpm / 60) / divBeats.max(0.001)]);
+		divBeats = Select.kr(lfo2Div.clip(0, 6), [0.25, 0.5, 1, 2, 4, 8, 16]);
+		lfoRate2 = Select.kr(lfo2Sync.clip(0, 1), [lfo2Rate.max(0.001), (bpm / 60) / divBeats.max(0.001)]);
+
+		lfoPhase1 = Select.kr(lfo1Reset.clip(0, 1), [Rand(0, 2pi), 0]);
+		lfoPhase2 = Select.kr(lfo2Reset.clip(0, 1), [Rand(0, 2pi), 0]);
+
+		env1 = EnvGen.kr(
+			Env.adsr(env1Atk.max(0.001), env1Dec.max(0.001), env1Sus.clip(0, 1), env1Rel.max(0.001)),
+			gate,
+			doneAction: 2
+		);
+
+		env2 = EnvGen.kr(
+			Env.adsr(env2Atk.max(0.001), env2Dec.max(0.001), env2Sus.clip(0, 1), env2Rel.max(0.001)),
+			gate
+		) * env2Depth.clip(0, 1);
+
+		lfo1 = Select.kr(lfo1Shape.clip(0, 8), [
+			LFSaw.kr(lfoRate1, lfoPhase1 / 2pi),
+			LFSaw.kr(lfoRate1, lfoPhase1 / 2pi).neg,
+			LFTri.kr(lfoRate1, lfoPhase1 / 2pi),
+			LFTri.kr(lfoRate1, lfoPhase1 / 2pi).linlin(-1, 1, 0, 1),
+			SinOsc.kr(lfoRate1, lfoPhase1),
+			SinOsc.kr(lfoRate1, lfoPhase1).linlin(-1, 1, 0, 1),
+			LFPulse.kr(lfoRate1, 0, 0.5).linlin(0, 1, -1, 1),
+			LFPulse.kr(lfoRate1, 0, 0.5),
+			LFNoise0.kr(lfoRate1)
+		]) * lfo1Depth.clip(0, 1) * lfo1On.clip(0, 1);
+
+		lfo2 = Select.kr(lfo2Shape.clip(0, 8), [
+			LFSaw.kr(lfoRate2, lfoPhase2 / 2pi),
+			LFSaw.kr(lfoRate2, lfoPhase2 / 2pi).neg,
+			LFTri.kr(lfoRate2, lfoPhase2 / 2pi),
+			LFTri.kr(lfoRate2, lfoPhase2 / 2pi).linlin(-1, 1, 0, 1),
+			SinOsc.kr(lfoRate2, lfoPhase2),
+			SinOsc.kr(lfoRate2, lfoPhase2).linlin(-1, 1, 0, 1),
+			LFPulse.kr(lfoRate2, 0, 0.5).linlin(0, 1, -1, 1),
+			LFPulse.kr(lfoRate2, 0, 0.5),
+			LFNoise0.kr(lfoRate2)
+		]) * lfo2Depth.clip(0, 1) * lfo2On.clip(0, 1);
+
+		divBeats = Select.kr(seqDiv.clip(0, 6), [0.25, 0.5, 1, 2, 4, 8, 16]);
+		seqRateHz = Select.kr(seqSync.clip(0, 1), [seqRate.max(0.001), (bpm / 60) / divBeats.max(0.001)]);
+		seqTrig = Impulse.kr(seqRateHz.max(0.001));
+		seqOffset = Select.kr(seqKeyTrig.clip(0, 1), [Rand(0, 31), 0]);
+		seqIndex = (PulseCount.kr(seqTrig) + seqOffset) % seqSteps.clip(1, 32);
+		seqRaw = Select.kr(seqIndex.clip(0, 31), seqVals);
+		seq = Select.kr(seqQuantize.clip(0, 1), [seqRaw, seqRaw.round(0.25)]) * seqDepth.clip(0, 1) * seqOn.clip(0, 1);
+
+		sourceFor = { |src, ccVal|
+			Select.kr(src.clip(0, 12), [
+				0,
+				env1,
+				env2,
+				lfo1,
+				lfo2,
+				seq,
+				xyX.linlin(0, 1, -1, 1),
+				xyY.linlin(0, 1, -1, 1),
+				velocity.clip(0, 1).linlin(0, 1, -1, 1),
+				modWheel.clip(0, 1).linlin(0, 1, -1, 1),
+				aftertouch.clip(0, 1).linlin(0, 1, -1, 1),
+				pitchBend.clip(-1, 1),
+				ccVal.clip(0, 1).linlin(0, 1, -1, 1)
+			])
+		};
+
+		modFor = { |targetIndex|
+			var base = targetIndex * 3;
+			(
+				sourceFor.value(modSrc[base], modCcVal[base]) * modAmt[base].clip(-1, 1)
+				+ (sourceFor.value(modSrc[base + 1], modCcVal[base + 1]) * modAmt[base + 1].clip(-1, 1))
+				+ (sourceFor.value(modSrc[base + 2], modCcVal[base + 2]) * modAmt[base + 2].clip(-1, 1))
+			).clip(-1, 1)
+		};
+
+		applyFilter = { |inSig, type, cutoff, res, width|
+			var rq = (1.0 - res.clip(0, 0.98)).max(0.02);
+			SelectX.ar(type.clip(0, 4), [
+				inSig,
+				RLPF.ar(inSig, cutoff.clip(20, 20400), rq),
+				RHPF.ar(inSig, cutoff.clip(20, 20400), rq),
+				BPF.ar(inSig, cutoff.clip(20, 20400), width.linlin(0, 1, 0.05, 1.0).clip(0.02, 1.0)),
+				BRF.ar(inSig, cutoff.clip(20, 20400), width.linlin(0, 1, 0.05, 1.0).clip(0.02, 1.0))
+			])
+		};
+
+		bendRatio = (pitchBend.clip(-1, 1) * bendRange.clip(0, 12)).midiratio;
+		ratioLag = Lag.kr(rootRatio * bendRatio, glide.max(0.001));
+		velAmp = velocity.clip(0, 1).linlin(0, 1, (1 - env1Vel.clip(0, 1)), 1);
+
+		makeGrain = { |on, sourceMode, fileBuf, liveBuf, amp, pitch, detune, position, livePosition,
+			density, grainCount, grainSize, window, jitter, panRand, rate, rateSync, rateDiv,
+			playMode, loopMode, preserveAttack, pattern, regionStart, regionEnd, loopStart, loopEnd,
+			modPos, modDensity, modSize, modPitch, modAmp, modPan|
+
+			var playBuf, bdur, regStart, regEnd, lpStart, lpEnd, lpLen;
+			var basePos, moving, ping, usePos, sourcePos, rateMul, syncedRate;
+			var dur, maxDensity, trigDensity, trig, pan, grainRate, sig, attackSig;
+
+			playBuf = Select.kr(sourceMode.clip(0, 1), [fileBuf, liveBuf]);
+			bdur = BufDur.kr(playBuf).max(0.001);
+
+			regStart = regionStart.clip(0, 0.999);
+			regEnd = regionEnd.clip(regStart + 0.001, 1);
+			lpStart = loopStart.clip(regStart, regEnd - 0.001);
+			lpEnd = loopEnd.clip(lpStart + 0.001, regEnd);
+			lpLen = (lpEnd - lpStart).max(0.001);
+
+			basePos = Select.kr(sourceMode.clip(0, 1), [position, livePosition]);
+			basePos = (basePos + (modPos * 0.5)).clip(0, 1);
+
+			syncedRate = Select.kr(rateDiv.clip(0, 6), [4, 2, 1, 0.5, 0.25, 0.125, 0.0625]) * (bpm / 120);
+			rateMul = Select.kr(rateSync.clip(0, 1), [rate, syncedRate]);
+
+			moving = Wrap.kr(basePos + LFSaw.kr(rateMul.abs.max(0.001) * 0.1).range(0, 1), 0, 1);
+			ping = (basePos + LFTri.kr(rateMul.abs.max(0.001) * 0.1).range(-0.5, 0.5)).clip(0, 1);
+			usePos = Select.kr(playMode.clip(0, 1), [basePos, Select.kr(loopMode.clip(0, 2), [basePos, moving, ping])]);
+			sourcePos = (lpStart + (usePos * lpLen)).clip(0, 1);
+
+			dur = (grainSize * window.linlin(0, 1, 0.55, 1.45)).clip(0.005, 2.0);
+			maxDensity = (grainCount.clip(1, 16) / dur.max(0.005)).clip(0.1, 200);
+			trigDensity = (density * (modDensity.linexp(-1, 1, 0.25, 4.0))).clip(0.1, maxDensity);
+			trig = Select.kr(pattern.clip(0, 2), [
+				Impulse.kr(trigDensity),
+				Dust.kr(trigDensity),
+				Impulse.kr(trigDensity) + Dust.kr(trigDensity * 0.35)
+			]);
+
+			pan = TRand.kr(0 - (panRand + (modPan * 0.5)).clip(0, 1), (panRand + (modPan * 0.5)).clip(0, 1), trig);
+			grainRate = ratioLag
+				* ((pitch + detune + (modPitch * 24)).clip(-48, 48)).midiratio
+				* rateMul
+				+ TRand.kr(0 - jitter.clip(0, 1), jitter.clip(0, 1), trig);
+
+			sig = GrainBuf.ar(
+				numChannels: 2,
+				trigger: trig,
+				dur: dur,
+				sndbuf: playBuf,
+				rate: grainRate,
+				pos: sourcePos,
+				interp: 4,
+				pan: pan
+			);
+
+			attackSig = HPF.ar(PlayBuf.ar(1, playBuf, grainRate, trig, sourcePos * BufFrames.kr(playBuf), loop: 0) ! 2, 1200) * 0.15;
+			(sig + (attackSig * preserveAttack.clip(0, 1))) * amp * (modAmp.linexp(-1, 1, 0.25, 2.0)) * on.clip(0, 1)
+		};
+
+		gr1 = makeGrain.value(
+			gr1On, gr1Source, gr1Bufnum, liveBufnum, gr1Amp, gr1Pitch, gr1Detune, gr1Position, gr1LivePosition,
+			gr1Density, gr1GrainCount, gr1GrainSize, gr1Window, gr1Jitter, gr1PanRand, gr1Rate, gr1RateSync, gr1RateDiv,
+			gr1PlayMode, gr1LoopMode, gr1PreserveAttack, gr1Pattern, gr1RegionStart, gr1RegionEnd, gr1LoopStart, gr1LoopEnd,
+			modFor.value(0), modFor.value(2), modFor.value(4), modFor.value(6), modFor.value(8), modFor.value(19)
+		);
+
+		gr2 = makeGrain.value(
+			gr2On, gr2Source, gr2Bufnum, liveBufnum, gr2Amp, gr2Pitch, gr2Detune, gr2Position, gr2LivePosition,
+			gr2Density, gr2GrainCount, gr2GrainSize, gr2Window, gr2Jitter, gr2PanRand, gr2Rate, gr2RateSync, gr2RateDiv,
+			gr2PlayMode, gr2LoopMode, gr2PreserveAttack, gr2Pattern, gr2RegionStart, gr2RegionEnd, gr2LoopStart, gr2LoopEnd,
+			modFor.value(1), modFor.value(3), modFor.value(5), modFor.value(7), modFor.value(9), modFor.value(20)
+		);
+
+		oscFreq = 60.midicps * ratioLag * ((oscPitch + oscDetune + (modFor.value(11) * 24)).clip(-48, 48)).midiratio;
+		osc = Select.ar(oscWave.clip(0, 4), [
+			SinOsc.ar(oscFreq),
+			Saw.ar(oscFreq),
+			Pulse.ar(oscFreq, oscPulseWidth.clip(0.05, 0.95)),
+			LFTri.ar(oscFreq),
+			PinkNoise.ar(0.55)
+		]);
+		osc = RLPF.ar(osc ! 2, (oscCutoff * modFor.value(12).linexp(-1, 1, 0.25, 4.0)).clip(80, 20400), (1 - oscRes.clip(0, 0.98)).max(0.02));
+		osc = osc * oscAmp * modFor.value(10).linexp(-1, 1, 0.25, 2.0) * oscOn.clip(0, 1);
+
+		raw = (gr1 + gr2 + osc) * env1 * velAmp;
+		liveFx = SoundIn.ar(0) ! 2 * liveInputToFx.clip(0, 1);
+		raw = raw + liveFx;
+
+		f1 = applyFilter.value(raw, filter1Type, filter1Cutoff * modFor.value(13).linexp(-1, 1, 0.25, 4.0), filter1Res, filter1Width);
+		f2 = applyFilter.value(raw, filter2Type, filter2Cutoff * modFor.value(14).linexp(-1, 1, 0.25, 4.0), filter2Res, filter2Width);
+		series = applyFilter.value(f1, filter2Type, filter2Cutoff * modFor.value(14).linexp(-1, 1, 0.25, 4.0), filter2Res, filter2Width);
+		parallel = (f1 + f2) * 0.5;
+		sig = SelectX.ar(filterRouting.clip(0, 1), [series, parallel]);
+
+		fx1Wet = Select.ar(fx1Type.clip(0, 3), [
+			sig,
+			(DelayC.ar(sig, 0.03, SinOsc.kr(fx1Rate.max(0.01)).range(0.001, fx1Depth.linlin(0, 1, 0.004, 0.024))) * (1 + (fx1Drive * 12))).tanh,
+			sig + DelayC.ar(sig, 0.05, SinOsc.kr(fx1Rate.max(0.01)).range(0.006, fx1Depth.linlin(0, 1, 0.010, 0.040))) * 0.65,
+			AllpassC.ar(sig, 0.04, SinOsc.kr(fx1Rate.max(0.01)).range(0.001, fx1Depth.linlin(0, 1, 0.006, 0.034)), 0.22)
+		]);
+		sig = SelectX.ar((fx1Mix + (modFor.value(15) * 0.5)).clip(0, 1), [sig, fx1Wet]);
+
+		divBeats = Select.kr(delayDiv.clip(0, 6), [0.25, 0.5, 1, 2, 4, 8, 16]);
+		delTime = Select.kr(delaySync.clip(0, 1), [delayTime.clip(0.001, 4), ((60 / bpm.max(1)) * divBeats).clip(0.001, 4)]);
+		fx2Dry = sig;
+		delayStage = { |inSig|
+			var wet = CombC.ar(inSig, 4.0, delTime, (delayFb.clip(0, 0.95) * 7.0).max(0.001));
+			wet = SelectX.ar(delayPingPong.clip(0, 1), [wet, [wet[1], wet[0]]]);
+			wet = LPF.ar(wet, delayFilter.clip(80, 20400));
+			SelectX.ar((delayMix + (modFor.value(16) * 0.5)).clip(0, 1), [inSig, wet])
+		};
+		reverbStage = { |inSig|
+			var revIn, wet;
+			revIn = DelayC.ar(inSig, 0.5, reverbPreDelay.clip(0, 0.5));
+			wet = FreeVerb2.ar(revIn[0], revIn[1], 1.0, reverbDecay.clip(0, 1), reverbDamp.clip(0, 1));
+			SelectX.ar((reverbMix + (modFor.value(17) * 0.5)).clip(0, 1), [inSig, wet])
+		};
+		delayOnly = delayStage.value(fx2Dry);
+		reverbOnly = reverbStage.value(fx2Dry);
+		delayThenReverb = reverbStage.value(delayOnly);
+		reverbThenDelay = delayStage.value(reverbOnly);
+		fx2Wet = Select.ar(fx2Type.clip(0, 3), [
+			fx2Dry,
+			delayOnly,
+			reverbOnly,
+			Select.ar(fx2Order.clip(0, 1), [delayThenReverb, reverbThenDelay])
+		]);
+
+		threshold = compressorAmt.linexp(0, 1, 1.0, 0.18);
+		sig = Compander.ar(fx2Wet, fx2Wet, thresh: threshold, slopeBelow: 1, slopeAbove: 0.45, clampTime: 0.01, relaxTime: 0.16);
+		sig = sig * masterAmp * modFor.value(18).linexp(-1, 1, 0.25, 2.0) * compressorOut;
+		Out.ar(out, Limiter.ar(sig, 0.98));
+	}).add;
+
+	s.sync;
+
+	// --------------------------------------------------------
+	// Buffers
+	// --------------------------------------------------------
+	app[\emptyBuf] = Buffer.alloc(s, s.sampleRate.asInteger.max(44100), 1);
+	app[\gr1Buf] = app[\emptyBuf];
+	app[\gr2Buf] = app[\emptyBuf];
+	app[\liveBuf] = Buffer.alloc(s, (s.sampleRate * 30).asInteger.max(44100), 1);
+	app[\liveRecorder] = Synth(\lemonLiveRecorderV3, [\bufnum, app[\liveBuf], \in, 0]);
+
+	// --------------------------------------------------------
+	// Helpers: modulation and voice args
+	// --------------------------------------------------------
+	app[\slotArrays] = {
+		var src = Array.fill(slotCount, 0);
+		var amt = Array.fill(slotCount, 0.0);
+		var ccVal = Array.fill(slotCount, 0.0);
+
+		app[\modTargets].do { |target, ti|
+			var slots = app[\modSlots][target];
+			3.do { |si|
+				var idx = (ti * 3) + si;
+				var slot = slots[si];
+				var cc = (slot[\cc] ? 1).asInteger.clip(0, 127);
+				src[idx] = (slot[\source] ? 0).asFloat;
+				amt[idx] = (slot[\amount] ? 0.0).asFloat;
+				ccVal[idx] = app[\ccValues][cc] ? 0.0;
 			};
+		};
+
+		(src: src, amt: amt, ccVal: ccVal)
+	};
+
+	app[\seqArray] = {
+		Array.fill(32, { |i| app[\params][("seqStep" ++ (i + 1)).asSymbol] ? 0.0 })
+	};
+
+	app[\voiceArgs] = { |note|
+		var p = app[\params];
+		var slotArrays = app[\slotArrays].value;
+		var info = app[\voices][note];
+		var isDrone = note == app[\droneKey];
+		var actualNote = if(isDrone) {
+			(p[\droneNote] ? p[\rootMidi]).asInteger.clip(0, 127)
+		} {
+			if(info.notNil and: { info[\note].notNil }) { info[\note] } { note }
+		};
+		var velocity = if(isDrone) {
+			((p[\droneVelocity] ? 100) / 127).clip(0.0, 1.0)
+		} {
+			if(info.notNil) { info[\velocity] ? 1.0 } { 1.0 }
+		};
+		var noteAfter = if(isDrone.not and: { app[\polyAftertouch][actualNote].notNil }) { app[\polyAftertouch][actualNote] } { p[\aftertouch] };
+		var rootRatio = (actualNote - p[\rootMidi]).midiratio;
+
+		[
+			\gr1Bufnum, app[\gr1Buf],
+			\gr2Bufnum, app[\gr2Buf],
+			\liveBufnum, app[\liveBuf],
+			\masterAmp, p[\masterAmp],
+			\rootRatio, rootRatio,
+			\glide, p[\glide],
+			\velocity, velocity,
+			\pitchBend, p[\pitchBend],
+			\bendRange, p[\bendRange],
+			\modWheel, p[\modWheel],
+			\aftertouch, noteAfter,
+			\xyX, p[\xyX],
+			\xyY, p[\xyY],
+			\bpm, p[\bpm],
+
+			\gr1On, p[\gr1On], \gr1Source, p[\gr1Source], \gr1Amp, p[\gr1Amp], \gr1Pitch, p[\gr1Pitch], \gr1Detune, p[\gr1Detune],
+			\gr1Position, p[\gr1Position], \gr1LivePosition, p[\gr1LivePosition], \gr1Density, p[\gr1Density], \gr1GrainCount, p[\gr1GrainCount],
+			\gr1GrainSize, p[\gr1GrainSize], \gr1Window, p[\gr1Window], \gr1Jitter, p[\gr1Jitter], \gr1PanRand, p[\gr1PanRand],
+			\gr1Rate, p[\gr1Rate], \gr1RateSync, p[\gr1RateSync], \gr1RateDiv, p[\gr1RateDiv], \gr1PlayMode, p[\gr1PlayMode],
+			\gr1LoopMode, p[\gr1LoopMode], \gr1PreserveAttack, p[\gr1PreserveAttack], \gr1Pattern, p[\gr1Pattern],
+			\gr1RegionStart, p[\gr1RegionStart], \gr1RegionEnd, p[\gr1RegionEnd], \gr1LoopStart, p[\gr1LoopStart], \gr1LoopEnd, p[\gr1LoopEnd],
+
+			\gr2On, p[\gr2On], \gr2Source, p[\gr2Source], \gr2Amp, p[\gr2Amp], \gr2Pitch, p[\gr2Pitch], \gr2Detune, p[\gr2Detune],
+			\gr2Position, p[\gr2Position], \gr2LivePosition, p[\gr2LivePosition], \gr2Density, p[\gr2Density], \gr2GrainCount, p[\gr2GrainCount],
+			\gr2GrainSize, p[\gr2GrainSize], \gr2Window, p[\gr2Window], \gr2Jitter, p[\gr2Jitter], \gr2PanRand, p[\gr2PanRand],
+			\gr2Rate, p[\gr2Rate], \gr2RateSync, p[\gr2RateSync], \gr2RateDiv, p[\gr2RateDiv], \gr2PlayMode, p[\gr2PlayMode],
+			\gr2LoopMode, p[\gr2LoopMode], \gr2PreserveAttack, p[\gr2PreserveAttack], \gr2Pattern, p[\gr2Pattern],
+			\gr2RegionStart, p[\gr2RegionStart], \gr2RegionEnd, p[\gr2RegionEnd], \gr2LoopStart, p[\gr2LoopStart], \gr2LoopEnd, p[\gr2LoopEnd],
+
+			\oscOn, p[\oscOn], \oscAmp, p[\oscAmp], \oscWave, p[\oscWave], \oscPitch, p[\oscPitch], \oscDetune, p[\oscDetune],
+			\oscPulseWidth, p[\oscPulseWidth], \oscCutoff, p[\oscCutoff], \oscRes, p[\oscRes],
+
+			\filter1Type, p[\filter1Type], \filter1Cutoff, p[\filter1Cutoff], \filter1Res, p[\filter1Res], \filter1Width, p[\filter1Width],
+			\filter2Type, p[\filter2Type], \filter2Cutoff, p[\filter2Cutoff], \filter2Res, p[\filter2Res], \filter2Width, p[\filter2Width],
+			\filterRouting, p[\filterRouting],
+
+			\env1Atk, p[\env1Atk], \env1Dec, p[\env1Dec], \env1Sus, p[\env1Sus], \env1Rel, p[\env1Rel], \env1Vel, p[\env1Vel],
+			\env2Atk, p[\env2Atk], \env2Dec, p[\env2Dec], \env2Sus, p[\env2Sus], \env2Rel, p[\env2Rel], \env2Depth, p[\env2Depth],
+
+			\lfo1On, p[\lfo1On], \lfo1Shape, p[\lfo1Shape], \lfo1Rate, p[\lfo1Rate], \lfo1Sync, p[\lfo1Sync],
+			\lfo1Div, p[\lfo1Div], \lfo1Depth, p[\lfo1Depth], \lfo1Reset, p[\lfo1Reset],
+			\lfo2On, p[\lfo2On], \lfo2Shape, p[\lfo2Shape], \lfo2Rate, p[\lfo2Rate], \lfo2Sync, p[\lfo2Sync],
+			\lfo2Div, p[\lfo2Div], \lfo2Depth, p[\lfo2Depth], \lfo2Reset, p[\lfo2Reset],
+
+			\seqOn, p[\seqOn], \seqSteps, p[\seqSteps], \seqRate, p[\seqRate], \seqSync, p[\seqSync],
+			\seqDiv, p[\seqDiv], \seqKeyTrig, p[\seqKeyTrig], \seqQuantize, p[\seqQuantize], \seqDepth, p[\seqDepth],
+
+			\fx1Type, p[\fx1Type], \fx1Mix, p[\fx1Mix], \fx1Rate, p[\fx1Rate], \fx1Depth, p[\fx1Depth], \fx1Drive, p[\fx1Drive],
+			\fx2Type, p[\fx2Type], \fx2Order, p[\fx2Order], \delayMix, p[\delayMix], \delayTime, p[\delayTime], \delaySync, p[\delaySync], \delayDiv, p[\delayDiv],
+			\delayFb, p[\delayFb], \delayFilter, p[\delayFilter], \delayPingPong, p[\delayPingPong],
+			\reverbMix, p[\reverbMix], \reverbPreDelay, p[\reverbPreDelay], \reverbDecay, p[\reverbDecay], \reverbDamp, p[\reverbDamp],
+			\liveInputToFx, p[\liveInputToFx], \compressorAmt, p[\compressorAmt], \compressorOut, p[\compressorOut],
+
+			\modSrc, slotArrays[\src],
+			\modAmt, slotArrays[\amt],
+			\modCcVal, slotArrays[\ccVal],
+			\seqVals, app[\seqArray].value
+		]
+	};
+
+	app[\updateStatus] = {
+		app[\deferGui].value({
+			var p, txt;
+			p = app[\params];
+			txt = "Voices: " ++ app[\voices].size ++ "/" ++ app[\maxVoices]
+				++ "    Sustain: " ++ if((p[\sustainOn] ? 0) == 1) { "ON" } { "OFF" }
+				++ "    PB: " ++ p[\pitchBend].round(0.01)
+				++ "    MW: " ++ p[\modWheel].round(0.01)
+				++ "    AT: " ++ p[\aftertouch].round(0.01)
+				++ "    BPM: " ++ p[\bpm].round(0.1);
+
+			if(app[\labels][\status].notNil) { app[\labels][\status].string_(txt) };
+			if(app[\labels][\presetStatus].notNil) { app[\labels][\presetStatus].string_(app[\presetStatus]) };
+			if(app[\labels][\gr1Path].notNil) { app[\labels][\gr1Path].string_(app[\sampleLabels][\gr1]) };
+			if(app[\labels][\gr2Path].notNil) { app[\labels][\gr2Path].string_(app[\sampleLabels][\gr2]) };
+			if(app[\labels][\voiceCount].notNil) { app[\labels][\voiceCount].string_("Active voices: " ++ app[\voices].size) };
 		});
 	};
 
-	~granV21[\loadPreset] = {
-		Dialog.openPanel({ |path|
-			var obj;
-			if(path.notNil) {
-				obj = Object.readArchive(path);
-				if(obj.notNil) {
-					obj.keysValuesDo { |k, v|
-						~granV21[\params][k] = v;
-					};
-					~granV21[\syncControls].value;
-					~granV21[\updateAllVoices].value;
+	app[\updateModIndicators] = {
+		app[\deferGui].value({
+			app[\modIndicators].keysValuesDo { |target, label|
+				var active = app[\modSlots][target].any { |slot| ((slot[\source] ? 0) != 0) and: { (slot[\amount] ? 0.0).abs > 0.0001 } };
+				label.string_(if(active) { "MOD" } { "---" });
+				label.stringColor_(if(active) { Color(0.85, 0.62, 0.0) } { Color.gray(0.55) });
+			};
+			if(app[\refreshModEditor].notNil) { app[\refreshModEditor].value };
+		});
+	};
+
+	app[\updateAllVoices] = {
+		app[\voices].keysValuesDo { |note, info|
+			if(info[\synth].notNil) {
+				info[\synth].set(*app[\voiceArgs].value(note));
+			};
+		};
+		app[\updateStatus].value;
+		app[\updateModIndicators].value;
+		app[\deferGui].value({
+			if(app[\waveView].notNil) { app[\waveView].refresh };
+			if(app[\xyView].notNil) { app[\xyView].refresh };
+		});
+	};
+
+	app[\resetSeqPlayhead] = {
+		if((app[\params][\seqKeyTrig] ? 1) == 1) {
+			app[\seqGuiPhase] = 0.0;
+			app[\seqGuiOffset] = 0;
+		};
+	};
+
+	app[\seqRateHz] = {
+		var p = app[\params];
+		var divs = [0.25, 0.5, 1, 2, 4, 8, 16];
+		var div = divs[(p[\seqDiv] ? 2).asInteger.clip(0, 6)];
+		if((p[\seqSync] ? 1) == 1) {
+			((p[\bpm] ? 120) / 60) / div.max(0.001)
+		} {
+			(p[\seqRate] ? 4.0).max(0.001)
+		}
+	};
+
+	app[\updateSeqPlayhead] = { |dt=0.05|
+		var p = app[\params];
+		var steps = (p[\seqSteps] ? 16).asInteger.clip(2, 32);
+		var active = (p[\seqOn] ? 0) == 1;
+		var step;
+		if(active) {
+			app[\seqGuiPhase] = (app[\seqGuiPhase] ? 0.0) + (dt * app[\seqRateHz].value);
+			step = (((app[\seqGuiPhase].floor.asInteger) + (app[\seqGuiOffset] ? 0)) % steps).clip(0, steps - 1);
+			app[\seqGuiStep] = step;
+		} {
+			app[\seqGuiStep] = nil;
+			step = nil;
+		};
+		app[\deferGui].value({
+			32.do { |i|
+				var ctl = app[\seqStepControls][i];
+				var label = app[\seqStepLabels][i];
+				var isActive = active and: { i == step };
+				var isEnabled = i < steps;
+				if(ctl.notNil) {
+					ctl.enabled_(isEnabled);
+					ctl.background_(if(isActive) {
+						Color(1.0, 0.86, 0.22)
+					} {
+						if(isEnabled) { Color.white } { Color.gray(0.86) }
+					});
+				};
+				if(label.notNil) {
+					label.stringColor_(if(isActive) {
+						Color(0.0, 0.45, 0.35)
+					} {
+						if(isEnabled) { Color.black } { Color.gray(0.55) }
+					});
 				};
 			};
+			if(app[\labels][\seqStatus].notNil) {
+				app[\labels][\seqStatus].string_(
+					if(active) {
+						"Current Step: " ++ (step + 1) ++ "/" ++ steps
+					} {
+						"Current Step: Off"
+					}
+				);
+			};
 		});
 	};
 
-	~granV21[\setupMIDI] = {
-		var onFunc, offFunc;
+	app[\releaseVoice] = { |note|
+		var info = app[\voices][note];
+		if(info.notNil) {
+			try { info[\synth].set(\gate, 0) } { };
+			app[\voices].removeAt(note);
+		};
+		app[\updateStatus].value;
+	};
 
+	app[\stealIfNeeded] = {
+		if(app[\voices].size >= app[\maxVoices]) {
+			var oldestNote, oldestSerial = 999999999;
+			app[\voices].keysValuesDo { |note, info|
+				if(note != app[\droneKey] and: { (info[\serial] ? 0) < oldestSerial }) {
+					oldestSerial = info[\serial];
+					oldestNote = note;
+				};
+			};
+			if(oldestNote.isNil) {
+				app[\voices].keysValuesDo { |note, info|
+					if((info[\serial] ? 0) < oldestSerial) {
+						oldestSerial = info[\serial];
+						oldestNote = note;
+					};
+				};
+			};
+			if(oldestNote.notNil) { app[\releaseVoice].value(oldestNote) };
+		};
+	};
+
+	app[\noteOn] = { |note, vel=100|
+		var sy, info;
+		app[\resetSeqPlayhead].value;
+		if(app[\voices][note].notNil) { app[\releaseVoice].value(note) };
+		app[\stealIfNeeded].value;
+		app[\voiceSerial] = app[\voiceSerial] + 1;
+		info = (synth: nil, note: note, velocity: (vel / 127).clip(0.0, 1.0), held: true, sustained: false, serial: app[\voiceSerial]);
+		app[\voices][note] = info;
+		sy = Synth(\lemonVoiceV3, app[\voiceArgs].value(note));
+		info[\synth] = sy;
+		app[\voices][note] = info;
+		app[\updateStatus].value;
+	};
+
+	app[\noteOff] = { |note|
+		var info = app[\voices][note];
+		if(info.notNil) {
+			info[\held] = false;
+			if((app[\params][\sustainOn] ? 0) == 1) {
+				info[\sustained] = true;
+				app[\voices][note] = info;
+			} {
+				app[\releaseVoice].value(note);
+			};
+		};
+	};
+
+	app[\startDrone] = {
+		var p, key, note, vel, info, sy;
+		app[\resetSeqPlayhead].value;
+		p = app[\params];
+		key = app[\droneKey];
+		note = (p[\droneNote] ? p[\rootMidi]).asInteger.clip(0, 127);
+		vel = ((p[\droneVelocity] ? 100) / 127).clip(0.0, 1.0);
+
+		if(app[\voices][key].isNil) {
+			app[\stealIfNeeded].value;
+			app[\voiceSerial] = app[\voiceSerial] + 1;
+			info = (synth: nil, note: note, velocity: vel, held: true, sustained: false, serial: app[\voiceSerial], drone: true);
+			app[\voices][key] = info;
+			sy = Synth(\lemonVoiceV3, app[\voiceArgs].value(key));
+			info[\synth] = sy;
+			app[\voices][key] = info;
+		} {
+			info = app[\voices][key];
+			info[\note] = note;
+			info[\velocity] = vel;
+			app[\voices][key] = info;
+			if(info[\synth].notNil) { info[\synth].set(*app[\voiceArgs].value(key)) };
+		};
+
+		app[\presetStatus] = "Auto Drone running: note " ++ note ++ " velocity " ++ (p[\droneVelocity] ? 100).asInteger;
+		app[\updateStatus].value;
+	};
+
+	app[\stopDrone] = {
+		if(app[\voices][app[\droneKey]].notNil) {
+			app[\releaseVoice].value(app[\droneKey]);
+			app[\presetStatus] = "Auto Drone stopped";
+			app[\updateStatus].value;
+		};
+	};
+
+	app[\maintainDrone] = {
+		if((app[\params][\autoDrone] ? 0) == 1) {
+			app[\startDrone].value;
+		} {
+			app[\stopDrone].value;
+		};
+	};
+
+	app[\panic] = {
+		app[\voices].keysValuesDo { |note, info| try { info[\synth].set(\gate, 0) } { } };
+		app[\voices].clear;
+		app[\params][\autoDrone] = 0;
+		app[\syncControls].value;
+		app[\updateStatus].value;
+	};
+
+	app[\channelOk] = { |chan|
+		var wanted = app[\params][\midiChannel] ? 0;
+		(wanted == 0) or: { chan == (wanted - 1) }
+	};
+
+	app[\setupMIDI] = {
+		var onFunc, offFunc, ccFunc, bendFunc, touchFunc, polyFunc, clockFunc, progFunc;
 		MIDIClient.init;
 		MIDIIn.connectAll;
 
 		onFunc = MIDIFunc.noteOn({ |vel, note, chan, src|
 			{
-				if(vel > 0) {
-					~granV21[\noteOn].value(note, vel);
-				} {
-					~granV21[\noteOff].value(note);
+				if(app[\channelOk].value(chan)) {
+					if(vel > 0) { app[\noteOn].value(note, vel) } { app[\noteOff].value(note) };
 				};
 			}.defer;
 		});
 
 		offFunc = MIDIFunc.noteOff({ |vel, note, chan, src|
+			{ if(app[\channelOk].value(chan)) { app[\noteOff].value(note) } }.defer;
+		});
+
+		ccFunc = MIDIFunc.cc({ |val, num, chan, src|
 			{
-				~granV21[\noteOff].value(note);
+				if(app[\channelOk].value(chan)) {
+					app[\ccValues][num.clip(0, 127)] = (val / 127).clip(0, 1);
+					if(num == 1) { app[\params][\modWheel] = (val / 127).clip(0, 1) };
+					if(num == 64) {
+						app[\params][\sustainOn] = if(val >= 64) { 1 } { 0 };
+						if(val < 64) {
+							var releaseNotes = List.new;
+							app[\voices].keysValuesDo { |note, info|
+								if((info[\sustained] ? false) and: { (info[\held] ? false).not }) {
+									releaseNotes.add(note);
+								};
+							};
+							releaseNotes.do { |note| app[\releaseVoice].value(note) };
+						};
+					};
+					if(app[\learnSlotIndex].notNil) {
+						var target = app[\selectedModTarget];
+						var si = app[\learnSlotIndex];
+						app[\modSlots][target][si][\source] = 12;
+						app[\modSlots][target][si][\cc] = num.clip(0, 127);
+						app[\learnSlotIndex] = nil;
+						app[\presetStatus] = "Learned CC " ++ num ++ " for " ++ target.asString ++ " slot " ++ (si + 1);
+					};
+					app[\updateAllVoices].value;
+				};
 			}.defer;
 		});
 
-		~granV21[\midiObjs].add(onFunc);
-		~granV21[\midiObjs].add(offFunc);
-	};
-
-	~granV21[\showPage] = { |index|
-		~granV21[\pages].do { |view, i| view.visible = (i == index) };
-		~granV21[\tabButtons].do { |bt, i| bt.value = if(i == index) { 1 } { 0 } };
-	};
-
-	~granV21[\setSliderAndBox] = { |key, value, minVal, maxVal, spec|
-		var sl = ~granV21[\sliders][key];
-		var nb = ~granV21[\boxes][key];
-		var norm;
-
-		if(sl.notNil) {
-			norm = if(spec == \exp) {
-				value.explin(minVal, maxVal, 0, 1).clip(0, 1)
-			} {
-				value.linlin(minVal, maxVal, 0, 1).clip(0, 1)
-			};
-			sl.value = norm;
-		};
-
-		if(nb.notNil) {
-			nb.value = value;
-		};
-	};
-
-
-	~granV21[\getWaveMetrics] = { |view|
-	var p = ~granV21[\params];
-	var vw = ~granV21[\view];
-	var w = view.bounds.width;
-	var h = view.bounds.height;
-
-	var zoom = (vw[\zoom] ? 1.0).clip(1.0, 64.0);
-	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
-	var maxScroll = (1.0 - visibleFrac).max(0.0);
-	var scroll = (vw[\scroll] ? 0.0).clip(0.0, 1.0) * maxScroll;
-	var visStart = scroll;
-	var visEnd = (scroll + visibleFrac).clip(0.0, 1.0);
-
-var regStart = p[\regionStart];
-var regEnd = p[\regionEnd];
-var regLen = (regEnd - regStart).max(0.001);
-
-var loopStart = (vw[\loopStart] ? regStart).clip(regStart, regEnd - 0.001);
-var loopEnd = (vw[\loopEnd] ? regEnd).clip(loopStart + 0.001, regEnd);
-var loopLen = (loopEnd - loopStart).max(0.001);
-
-var aAbsNorm = (loopStart + (p[\aPosition].clip(0, 1) * loopLen)).clip(0, 1);
-var bAbsNorm = (loopStart + (p[\bPosition].clip(0, 1) * loopLen)).clip(0, 1);
-
-	var xFromNorm = { |n|
-		((n - visStart) / visibleFrac * w).clip(0, w);
-	};
-
-	(
-		w: w,
-		h: h,
-		visStart: visStart,
-		visEnd: visEnd,
-		visibleFrac: visibleFrac,
-		regStart: regStart,
-regEnd: regEnd,
-regLen: regLen,
-loopStart: loopStart,
-loopEnd: loopEnd,
-loopLen: loopLen,
-		aAbsNorm: aAbsNorm,
-		bAbsNorm: bAbsNorm,
-		aX: xFromNorm.value(aAbsNorm),
-		bX: xFromNorm.value(bAbsNorm),
-		startX: xFromNorm.value(regStart),
-		endX: xFromNorm.value(regEnd),
-		xFromNorm: xFromNorm
-	)
-};
-
-
-	~granV21[\syncControls] = {
-		var p = ~granV21[\params];
-
-		[
-
-	[\masterAmp, 0, 1, \lin],
-	[\rootMidi, 24, 96, \lin],
-	[\glide, 0.001, 1.0, \exp],
-	[\atk, 0.001, 2, \exp],
-	[\rel, 0.001, 4, \exp],
-
-			[\aAmp, 0, 1, \lin],
-			[\aPosition, 0, 1, \lin],
-			[\aDensity, 0.5, 80, \exp],
-			[\aDur, 0.005, 1.0, \exp],
-			[\aJitter, 0, 1, \lin],
-			[\aRateMul, -2, 2, \lin],
-[\aRateRand, 0, 1, \lin],
-[\aScanRate, 0.001, 6, \exp],
-[\aScanWidth, 0, 1, \lin],
-[\aPanWidth, 0, 1, \lin],
-
-			[\bAmp, 0, 1, \lin],
-			[\bPosition, 0, 1, \lin],
-			[\bDensity, 0.5, 80, \exp],
-			[\bDur, 0.005, 1.0, \exp],
-			[\bJitter, 0, 1, \lin],
-			[\bRateMul, -2, 2, \lin],
-[\bRateRand, 0, 1, \lin],
-[\bScanRate, 0.001, 6, \exp],
-[\bScanWidth, 0, 1, \lin],
-[\bPanWidth, 0, 1, \lin],
-
-			[\oscAmp, 0, 1, \lin],
-			[\oscDetune, -24, 24, \lin],
-			[\oscCutoff, 100, 18000, \exp],
-			[\oscRes, 0, 0.95, \lin],
-
-			[\filter1Cutoff, 20, 20000, \exp],
-			[\filter1Res, 0, 0.95, \lin],
-
-			[\filter2Cutoff, 20, 20000, \exp],
-			[\filter2Res, 0, 0.95, \lin],
-
-			[\delayMix, 0, 1, \lin],
-			[\delayTime, 0.001, 1.5, \exp],
-			[\delayFb, 0, 0.95, \lin],
-
-			[\reverbMix, 0, 1, \lin],
-			[\reverbRoom, 0, 1, \lin],
-			[\reverbDamp, 0, 1, \lin],
-
-			[\lfo1Rate, 0.001, 20, \exp],
-			[\lfo1Depth, 0, 1, \lin],
-			[\lfo1Amt1, -1, 1, \lin],
-			[\lfo1Amt2, -1, 1, \lin],
-			[\lfo1Amt3, -1, 1, \lin],
-			[\lfo1Amt4, -1, 1, \lin],
-
-			[\lfo2Rate, 0.001, 20, \exp],
-			[\lfo2Depth, 0, 1, \lin],
-			[\lfo2Amt1, -1, 1, \lin],
-			[\lfo2Amt2, -1, 1, \lin],
-			[\lfo2Amt3, -1, 1, \lin],
-			[\lfo2Amt4, -1, 1, \lin],
-
-			[\modEnv1Atk, 0.001, 4, \exp],
-			[\modEnv1Dec, 0.001, 4, \exp],
-			[\modEnv1Sus, 0, 1, \lin],
-			[\modEnv1Rel, 0.001, 6, \exp],
-			[\modEnv1Depth, 0, 1, \lin],
-			[\modEnv1Amt1, -1, 1, \lin],
-			[\modEnv1Amt2, -1, 1, \lin],
-			[\modEnv1Amt3, -1, 1, \lin],
-			[\modEnv1Amt4, -1, 1, \lin],
-
-			[\modEnv2Atk, 0.001, 4, \exp],
-			[\modEnv2Dec, 0.001, 4, \exp],
-			[\modEnv2Sus, 0, 1, \lin],
-			[\modEnv2Rel, 0.001, 6, \exp],
-			[\modEnv2Depth, 0, 1, \lin],
-			[\modEnv2Amt1, -1, 1, \lin],
-			[\modEnv2Amt2, -1, 1, \lin],
-			[\modEnv2Amt3, -1, 1, \lin],
-			[\modEnv2Amt4, -1, 1, \lin],
-
-
-			[\hpf, 20, 8000, \exp],
-			[\lpf, 100, 20000, \exp]
-		].do { |row|
-			~granV21[\setSliderAndBox].value(row[0], p[row[0]], row[1], row[2], row[3]);
-		};
-
-		if(~granV21[\toggles][\aOn].notNil) { ~granV21[\toggles][\aOn].value = p[\aOn] };
-		if(~granV21[\toggles][\bOn].notNil) { ~granV21[\toggles][\bOn].value = p[\bOn] };
-		if(~granV21[\toggles][\oscOn].notNil) { ~granV21[\toggles][\oscOn].value = p[\oscOn] };
-		if(~granV21[\toggles][\lfo1On].notNil) { ~granV21[\toggles][\lfo1On].value = p[\lfo1On] };
-		if(~granV21[\toggles][\lfo2On].notNil) { ~granV21[\toggles][\lfo2On].value = p[\lfo2On] };
-		if(~granV21[\toggles][\freezeOn].notNil) { ~granV21[\toggles][\freezeOn].value = p[\freezeOn] };
-		if(~granV21[\toggles][\freezeLockA].notNil) { ~granV21[\toggles][\freezeLockA].value = p[\freezeLockA] };
-		if(~granV21[\toggles][\freezeLockB].notNil) { ~granV21[\toggles][\freezeLockB].value = p[\freezeLockB] };
-
-
-		if(~granV21[\menus][\oscWave].notNil) { ~granV21[\menus][\oscWave].value = p[\oscWave] };
-		if(~granV21[\menus][\aScanMode].notNil) { ~granV21[\menus][\aScanMode].value = p[\aScanMode] ? 0 };
-		if(~granV21[\menus][\bScanMode].notNil) { ~granV21[\menus][\bScanMode].value = p[\bScanMode] ? 0 };
-		if(~granV21[\menus][\filter1Type].notNil) { ~granV21[\menus][\filter1Type].value = p[\filter1Type] ? 0 };
-		if(~granV21[\menus][\filter2Type].notNil) { ~granV21[\menus][\filter2Type].value = p[\filter2Type] ? 0 };
-		if(~granV21[\menus][\filterRouting].notNil) { ~granV21[\menus][\filterRouting].value = p[\filterRouting] ? 0 };
-		if(~granV21[\menus][\fxOrder].notNil) { ~granV21[\menus][\fxOrder].value = p[\fxOrder] ? 0 };
-		if(~granV21[\menus][\lfo1Shape].notNil) { ~granV21[\menus][\lfo1Shape].value = p[\lfo1Shape] ? 0 };
-		if(~granV21[\menus][\lfo1Dest1].notNil) { ~granV21[\menus][\lfo1Dest1].value = p[\lfo1Dest1] ? 0 };
-		if(~granV21[\menus][\lfo1Dest2].notNil) { ~granV21[\menus][\lfo1Dest2].value = p[\lfo1Dest2] ? 0 };
-		if(~granV21[\menus][\lfo1Dest3].notNil) { ~granV21[\menus][\lfo1Dest3].value = p[\lfo1Dest3] ? 0 };
-		if(~granV21[\menus][\lfo1Dest4].notNil) { ~granV21[\menus][\lfo1Dest4].value = p[\lfo1Dest4] ? 0 };
-				if(~granV21[\menus][\lfo2Shape].notNil) { ~granV21[\menus][\lfo2Shape].value = p[\lfo2Shape] ? 0 };
-		if(~granV21[\menus][\lfo2Dest1].notNil) { ~granV21[\menus][\lfo2Dest1].value = p[\lfo2Dest1] ? 0 };
-		if(~granV21[\menus][\lfo2Dest2].notNil) { ~granV21[\menus][\lfo2Dest2].value = p[\lfo2Dest2] ? 0 };
-		if(~granV21[\menus][\lfo2Dest3].notNil) { ~granV21[\menus][\lfo2Dest3].value = p[\lfo2Dest3] ? 0 };
-		if(~granV21[\menus][\lfo2Dest4].notNil) { ~granV21[\menus][\lfo2Dest4].value = p[\lfo2Dest4] ? 0 };
-
-		if(~granV21[\menus][\modEnv1Dest1].notNil) { ~granV21[\menus][\modEnv1Dest1].value = p[\modEnv1Dest1] ? 0 };
-		if(~granV21[\menus][\modEnv1Dest2].notNil) { ~granV21[\menus][\modEnv1Dest2].value = p[\modEnv1Dest2] ? 0 };
-		if(~granV21[\menus][\modEnv1Dest3].notNil) { ~granV21[\menus][\modEnv1Dest3].value = p[\modEnv1Dest3] ? 0 };
-		if(~granV21[\menus][\modEnv1Dest4].notNil) { ~granV21[\menus][\modEnv1Dest4].value = p[\modEnv1Dest4] ? 0 };
-
-				if(~granV21[\menus][\modEnv2Dest1].notNil) { ~granV21[\menus][\modEnv2Dest1].value = p[\modEnv2Dest1] ? 0 };
-		if(~granV21[\menus][\modEnv2Dest2].notNil) { ~granV21[\menus][\modEnv2Dest2].value = p[\modEnv2Dest2] ? 0 };
-		if(~granV21[\menus][\modEnv2Dest3].notNil) { ~granV21[\menus][\modEnv2Dest3].value = p[\modEnv2Dest3] ? 0 };
-		if(~granV21[\menus][\modEnv2Dest4].notNil) { ~granV21[\menus][\modEnv2Dest4].value = p[\modEnv2Dest4] ? 0 };
-
-		if(~granV21[\menus][\freezeSourceMode].notNil) { ~granV21[\menus][\freezeSourceMode].value = p[\freezeSourceMode] ? 0 };
-
-		if(~granV21[\toggles][\delayOn].notNil) { ~granV21[\toggles][\delayOn].value = p[\delayOn] };
-		if(~granV21[\toggles][\reverbOn].notNil) { ~granV21[\toggles][\reverbOn].value = p[\reverbOn] };
-
-
-		if(~granV21[\pathLabel].notNil) {~granV21[\pathLabel].string_(~granV21[\samplePath]); };
-
-		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-
-		if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-
-		if(~granV21[\xyView].notNil) { ~granV21[\xyView].refresh };
-
-		if(~granV21[\refreshModLfoUi].notNil) { ~granV21[\refreshModLfoUi].value; };
-if(~granV21[\refreshModEnvUi].notNil) { ~granV21[\refreshModEnvUi].value; };
-if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-	};
-
-
-			~granV21[\refreshStatusStrip] = {
-		var p = ~granV21[\params];
-		var freezeState, freezeSrc, lockState, previewState, bufName, txt;
-
-		freezeState = if((p[\freezeOn] ? 0) == 1) { "Freeze: ON" } { "Freeze: OFF" };
-		freezeSrc = if((p[\freezeSourceMode] ? 0) == 1) { "Source: Live Buffer" } { "Source: Current Buffer" };
-
-		lockState =
-			"A Lock: " ++ if((p[\freezeLockA] ? 0) == 1) { "ON" } { "OFF" }
-			++ "  |  "
-			++ "B Lock: " ++ if((p[\freezeLockB] ? 0) == 1) { "ON" } { "OFF" };
-
-		previewState = if(~granV21[\isPreviewing] == true) { "Preview: ON" } { "Preview: OFF" };
-		bufName = "Buffer: " ++ (~granV21[\samplePath] ? "No sample loaded");
-
-		txt = bufName ++ "    |    " ++ freezeState ++ "    |    " ++ freezeSrc
-		++ "    |    " ++ lockState ++ "    |    " ++ previewState;
-
-		if(~granV21[\statusStrip].notNil) {
-			~granV21[\statusStrip].string_(txt);
-			~granV21[\statusStrip].refresh;
-		};
-	};
-
-
-		~granV21[\refreshModLfoUi] = {
-		var idx = ~granV21[\modUi][\lfoIndex] ? 1;
-		var prefix, titleStr, routeTitleStr;
-
-		prefix = if(idx == 1) { "lfo1" } { "lfo2" };
-		titleStr = if(idx == 1) { "LFO 1" } { "LFO 2" };
-		routeTitleStr = if(idx == 1) { "LFO 1 Routing" } { "LFO 2 Routing" };
-
-		if(~granV21[\modLfoTitle].notNil) {
-			~granV21[\modLfoTitle].string_(titleStr);
-		};
-
-		if(~granV21[\modLfoRoutingTitle].notNil) {
-			~granV21[\modLfoRoutingTitle].string_(routeTitleStr);
-		};
-
-	if(~granV21[\modLfoToggleLabel].notNil) {
-	~granV21[\modLfoToggleLabel].string_("LFO View");
-};
-
-		if(~granV21[\toggles][\modLfoOn].notNil) {
-			~granV21[\toggles][\modLfoOn].value = ~granV21[\params][(prefix ++ "On").asSymbol];
-		};
-
-		if(~granV21[\menus][\modLfoShape].notNil) {
-			~granV21[\menus][\modLfoShape].value = ~granV21[\params][(prefix ++ "Shape").asSymbol] ? 0;
-		};
-
-		if(~granV21[\menus][\modLfoDest1].notNil) {
-			~granV21[\menus][\modLfoDest1].value = ~granV21[\params][(prefix ++ "Dest1").asSymbol] ? 0;
-		};
-		if(~granV21[\menus][\modLfoDest2].notNil) {
-			~granV21[\menus][\modLfoDest2].value = ~granV21[\params][(prefix ++ "Dest2").asSymbol] ? 0;
-		};
-		if(~granV21[\menus][\modLfoDest3].notNil) {
-			~granV21[\menus][\modLfoDest3].value = ~granV21[\params][(prefix ++ "Dest3").asSymbol] ? 0;
-		};
-		if(~granV21[\menus][\modLfoDest4].notNil) {
-			~granV21[\menus][\modLfoDest4].value = ~granV21[\params][(prefix ++ "Dest4").asSymbol] ? 0;
-		};
-
-		if(~granV21[\sliders][\modLfoRate].notNil) {
-			~granV21[\sliders][\modLfoRate].value = ~granV21[\params][(prefix ++ "Rate").asSymbol].explin(0.001, 20, 0, 1).clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoRate].notNil) {
-			~granV21[\boxes][\modLfoRate].value = ~granV21[\params][(prefix ++ "Rate").asSymbol];
-		};
-
-		if(~granV21[\sliders][\modLfoDepth].notNil) {
-			~granV21[\sliders][\modLfoDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol].clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoDepth].notNil) {
-			~granV21[\boxes][\modLfoDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol];
-		};
-
-		if(~granV21[\sliders][\modLfoAmt1].notNil) {
-			~granV21[\sliders][\modLfoAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoAmt1].notNil) {
-			~granV21[\boxes][\modLfoAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol];
-		};
-
-		if(~granV21[\sliders][\modLfoAmt2].notNil) {
-			~granV21[\sliders][\modLfoAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoAmt2].notNil) {
-			~granV21[\boxes][\modLfoAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol];
-		};
-
-		if(~granV21[\sliders][\modLfoAmt3].notNil) {
-			~granV21[\sliders][\modLfoAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoAmt3].notNil) {
-			~granV21[\boxes][\modLfoAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol];
-		};
-
-		if(~granV21[\sliders][\modLfoAmt4].notNil) {
-			~granV21[\sliders][\modLfoAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-		};
-		if(~granV21[\boxes][\modLfoAmt4].notNil) {
-			~granV21[\boxes][\modLfoAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol];
-		};
-	};
-
-
-
-	~granV21[\refreshModEnvUi] = {
-	var idx = ~granV21[\modUi][\envIndex] ? 1;
-	var prefix, titleStr, routeTitleStr;
-
-	prefix = if(idx == 1) { "modEnv1" } { "modEnv2" };
-	titleStr = if(idx == 1) { "Mod Env 1" } { "Mod Env 2" };
-	routeTitleStr = if(idx == 1) { "Env 1 Routing" } { "Env 2 Routing" };
-
-	if(~granV21[\modEnvTitle].notNil) {
-		~granV21[\modEnvTitle].string_(titleStr);
-	};
-
-	if(~granV21[\modEnvRoutingTitle].notNil) {
-		~granV21[\modEnvRoutingTitle].string_(routeTitleStr);
-	};
-
-	if(~granV21[\modEnvToggleLabel].notNil) {
-	~granV21[\modEnvToggleLabel].string_("Env View");
-};
-
-	if(~granV21[\sliders][\modEnvAtk].notNil) {
-		~granV21[\sliders][\modEnvAtk].value = ~granV21[\params][(prefix ++ "Atk").asSymbol].explin(0.001, 4, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvAtk].notNil) {
-		~granV21[\boxes][\modEnvAtk].value = ~granV21[\params][(prefix ++ "Atk").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvDec].notNil) {
-		~granV21[\sliders][\modEnvDec].value = ~granV21[\params][(prefix ++ "Dec").asSymbol].explin(0.001, 4, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvDec].notNil) {
-		~granV21[\boxes][\modEnvDec].value = ~granV21[\params][(prefix ++ "Dec").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvSus].notNil) {
-		~granV21[\sliders][\modEnvSus].value = ~granV21[\params][(prefix ++ "Sus").asSymbol].clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvSus].notNil) {
-		~granV21[\boxes][\modEnvSus].value = ~granV21[\params][(prefix ++ "Sus").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvRel].notNil) {
-		~granV21[\sliders][\modEnvRel].value = ~granV21[\params][(prefix ++ "Rel").asSymbol].explin(0.001, 6, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvRel].notNil) {
-		~granV21[\boxes][\modEnvRel].value = ~granV21[\params][(prefix ++ "Rel").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvDepth].notNil) {
-		~granV21[\sliders][\modEnvDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol].clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvDepth].notNil) {
-		~granV21[\boxes][\modEnvDepth].value = ~granV21[\params][(prefix ++ "Depth").asSymbol];
-	};
-
-	if(~granV21[\menus][\modEnvDest1].notNil) {
-		~granV21[\menus][\modEnvDest1].value = ~granV21[\params][(prefix ++ "Dest1").asSymbol] ? 0;
-	};
-	if(~granV21[\menus][\modEnvDest2].notNil) {
-		~granV21[\menus][\modEnvDest2].value = ~granV21[\params][(prefix ++ "Dest2").asSymbol] ? 0;
-	};
-	if(~granV21[\menus][\modEnvDest3].notNil) {
-		~granV21[\menus][\modEnvDest3].value = ~granV21[\params][(prefix ++ "Dest3").asSymbol] ? 0;
-	};
-	if(~granV21[\menus][\modEnvDest4].notNil) {
-		~granV21[\menus][\modEnvDest4].value = ~granV21[\params][(prefix ++ "Dest4").asSymbol] ? 0;
-	};
-
-	if(~granV21[\sliders][\modEnvAmt1].notNil) {
-		~granV21[\sliders][\modEnvAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvAmt1].notNil) {
-		~granV21[\boxes][\modEnvAmt1].value = ~granV21[\params][(prefix ++ "Amt1").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvAmt2].notNil) {
-		~granV21[\sliders][\modEnvAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvAmt2].notNil) {
-		~granV21[\boxes][\modEnvAmt2].value = ~granV21[\params][(prefix ++ "Amt2").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvAmt3].notNil) {
-		~granV21[\sliders][\modEnvAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvAmt3].notNil) {
-		~granV21[\boxes][\modEnvAmt3].value = ~granV21[\params][(prefix ++ "Amt3").asSymbol];
-	};
-
-	if(~granV21[\sliders][\modEnvAmt4].notNil) {
-		~granV21[\sliders][\modEnvAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol].linlin(-1, 1, 0, 1).clip(0, 1);
-	};
-	if(~granV21[\boxes][\modEnvAmt4].notNil) {
-		~granV21[\boxes][\modEnvAmt4].value = ~granV21[\params][(prefix ++ "Amt4").asSymbol];
-	};
-};
-
-
-	~granV21[\spawnVisualDots] = { |which|
-	nil
-};
-
-~granV21[\decayVisualDots] = {
-	~granV21[\grainDotsA].clear;
-	~granV21[\grainDotsB].clear;
-};
-
-~granV21[\startVisualizer] = {
-	if(~granV21[\visRunning] == true) { ^nil };
-
-	~granV21[\visRunning] = true;
-
-	AppClock.sched(0.05, {
-		if(~granV21.isNil) { ^nil };
-		if(~granV21[\visRunning] != true) { ^nil };
-
-		~granV21[\visTime] = ~granV21[\visTime] + 0.05;
-		~granV21[\decayVisualDots].value;
-		~granV21[\spawnVisualDots].value(\a);
-		~granV21[\spawnVisualDots].value(\b);
-
-		if(~granV21[\waveView].notNil) {
-			~granV21[\waveView].refresh;
-		};
-
-		0.05
-	});
-};
-
-~granV21[\stopVisualizer] = {
-	~granV21[\visRunning] = false;
-};
-
-	~granV21[\makeSliderRow] = { |parent, y, label, key, minVal, maxVal, spec=\lin, decimals=3|
-		var lbl, sl, nb;
-
-		lbl = StaticText(parent, Rect(12, y, 90, 20)).string_(label);
-
-		sl = Slider(parent, Rect(105, y, 250, 20));
-		nb = NumberBox(parent, Rect(365, y, 75, 20)).decimals_(decimals);
-
-		sl.action_({
-			var v = if(spec == \exp) {
-				sl.value.linexp(0, 1, minVal, maxVal)
-			} {
-				sl.value.linlin(0, 1, minVal, maxVal)
-			};
-
-			~granV21[\params][key] = v;
-			nb.value = v;
-			~granV21[\updateAllVoices].value;
+		bendFunc = MIDIFunc.bend({ |val, chan, src|
+			{
+				if(app[\channelOk].value(chan)) {
+					app[\params][\pitchBend] = ((val - 8192) / 8192).clip(-1, 1);
+					app[\updateAllVoices].value;
+				};
+			}.defer;
 		});
 
+		touchFunc = MIDIFunc.touch({ |val, chan, src|
+			{
+				if(app[\channelOk].value(chan)) {
+					app[\params][\aftertouch] = (val / 127).clip(0, 1);
+					app[\updateAllVoices].value;
+				};
+			}.defer;
+		});
+
+		polyFunc = MIDIFunc.polytouch({ |val, note, chan, src|
+			{
+				if(app[\channelOk].value(chan)) {
+					app[\polyAftertouch][note] = (val / 127).clip(0, 1);
+					app[\updateAllVoices].value;
+				};
+			}.defer;
+		});
+
+		try {
+			clockFunc = MIDIFunc.midiClock({
+				{
+					if((app[\params][\clockSource] ? 0) == 1) {
+						var now = SystemClock.seconds;
+						if(app[\midiClockStart].isNil) {
+							app[\midiClockStart] = now;
+							app[\midiClockCount] = 0;
+						};
+						app[\midiClockCount] = app[\midiClockCount] + 1;
+						if(app[\midiClockCount] >= 24) {
+							var elapsed = (now - app[\midiClockStart]).max(0.001);
+							app[\params][\bpm] = (60 / elapsed).clip(40, 250);
+							app[\midiClockStart] = now;
+							app[\midiClockCount] = 0;
+							app[\updateAllVoices].value;
+						};
+					};
+				}.defer;
+			});
+			app[\midiObjs].add(clockFunc);
+		} { };
+
+		try {
+			progFunc = MIDIFunc.program({ |val, chan, src|
+				{ app[\presetStatus] = "Program Change received: " ++ val ++ " (preset browsing not mapped)"; app[\updateStatus].value }.defer;
+			});
+			app[\midiObjs].add(progFunc);
+		} { };
+
+		[onFunc, offFunc, ccFunc, bendFunc, touchFunc, polyFunc].do { |obj| app[\midiObjs].add(obj) };
+	};
+
+	// --------------------------------------------------------
+	// File / preset helpers
+	// --------------------------------------------------------
+	app[\loadGranulatorPath] = { |which, path|
+		var key = if(which == 1) { \gr1 } { \gr2 };
+		var bufKey = if(which == 1) { \gr1Buf } { \gr2Buf };
+		var sourceKey = ("gr" ++ which ++ "Source").asSymbol;
+		path = path.asString.standardizePath;
+		Buffer.readChannel(s, path, channels: [0], action: { |buf|
+			if(app[bufKey].notNil and: { app[bufKey] != app[\emptyBuf] }) { try { app[bufKey].free } { } };
+			app[bufKey] = buf;
+			app[\samplePaths][key] = path;
+			app[\sampleLabels][key] = "GR" ++ which ++ ": " ++ PathName(path).fileName;
+			app[\params][sourceKey] = 0;
+			app[\presetStatus] = "Loaded " ++ app[\sampleLabels][key];
+			app[\refreshWaveData].value;
+			app[\syncControls].value;
+			app[\updateAllVoices].value;
+			app[\maintainDrone].value;
+		});
+	};
+
+	app[\loadGranulator] = { |which|
+		Dialog.openPanel({ |path|
+			if(path.notNil) { app[\loadGranulatorPath].value(which, path) };
+		});
+	};
+
+	app[\captureLiveToSelected] = {
+		Routine({
+			var which = app[\selectedGran] ? 1;
+			var bufKey = if(which == 1) { \gr1Buf } { \gr2Buf };
+			var key = if(which == 1) { \gr1 } { \gr2 };
+			var newBuf = Buffer.alloc(s, app[\liveBuf].numFrames, 1);
+			s.sync;
+			app[\liveBuf].copyData(newBuf, numSamples: app[\liveBuf].numFrames);
+			s.sync;
+			if(app[bufKey].notNil and: { app[bufKey] != app[\emptyBuf] }) { try { app[bufKey].free } { } };
+			app[bufKey] = newBuf;
+			app[\samplePaths][key] = nil;
+			app[\sampleLabels][key] = "GR" ++ which ++ ": Captured live history";
+			app[\params][("gr" ++ which ++ "Source").asSymbol] = 0;
+			app[\presetStatus] = "Captured live history into GR" ++ which;
+			app[\refreshWaveData].value;
+			app[\syncControls].value;
+			app[\updateAllVoices].value;
+			app[\maintainDrone].value;
+		}).play(SystemClock);
+	};
+
+	app[\presetObject] = {
+		(
+			schemaVersion: app[\schemaVersion],
+			params: app[\params].copy,
+			modSlots: app[\modSlots].deepCopy,
+			samplePaths: app[\samplePaths].copy,
+			sampleLabels: app[\sampleLabels].copy,
+			view: app[\view].copy,
+			selectedGran: app[\selectedGran]
+		)
+	};
+
+	app[\savePreset] = {
+		Dialog.savePanel({ |path|
+			if(path.notNil) {
+				app[\presetObject].value.writeArchive(path);
+				app[\presetStatus] = "Saved V3 preset: " ++ PathName(path).fileName;
+				app[\updateStatus].value;
+			};
+		});
+	};
+
+	app[\loadPresetObject] = { |obj|
+		var p = app[\params];
+		if(obj.isNil) { ^nil };
+
+		if(obj[\schemaVersion] == 3) {
+			obj[\params].keysValuesDo { |k, v| p[k] = v };
+			if(obj[\modSlots].notNil) { app[\modSlots] = obj[\modSlots] };
+			if(obj[\samplePaths].notNil) { app[\samplePaths] = obj[\samplePaths] };
+			if(obj[\sampleLabels].notNil) { app[\sampleLabels] = obj[\sampleLabels] };
+			if(obj[\view].notNil) { app[\view] = obj[\view] };
+			if(obj[\selectedGran].notNil) { app[\selectedGran] = obj[\selectedGran] };
+			app[\presetStatus] = "Loaded V3 preset";
+
+			if(app[\samplePaths][\gr1].notNil) { app[\loadGranulatorPath].value(1, app[\samplePaths][\gr1]) };
+			if(app[\samplePaths][\gr2].notNil) { app[\loadGranulatorPath].value(2, app[\samplePaths][\gr2]) };
+		} {
+			obj.keysValuesDo { |k, v|
+				switch(k,
+					\aOn, { p[\gr1On] = v }, \aAmp, { p[\gr1Amp] = v }, \aDensity, { p[\gr1Density] = v },
+					\aDur, { p[\gr1GrainSize] = v }, \aJitter, { p[\gr1Jitter] = v }, \aPosition, { p[\gr1Position] = v },
+					\aPanWidth, { p[\gr1PanRand] = v }, \aRateMul, { p[\gr1Rate] = v },
+					\bOn, { p[\gr2On] = v }, \bAmp, { p[\gr2Amp] = v }, \bDensity, { p[\gr2Density] = v },
+					\bDur, { p[\gr2GrainSize] = v }, \bJitter, { p[\gr2Jitter] = v }, \bPosition, { p[\gr2Position] = v },
+					\bPanWidth, { p[\gr2PanRand] = v }, \bRateMul, { p[\gr2Rate] = v },
+					\oscOn, { p[\oscOn] = v }, \oscAmp, { p[\oscAmp] = v }, \oscWave, { p[\oscWave] = v },
+					\oscDetune, { p[\oscDetune] = v }, \oscCutoff, { p[\oscCutoff] = v }, \oscRes, { p[\oscRes] = v },
+					\filter1Type, { p[\filter1Type] = v }, \filter1Cutoff, { p[\filter1Cutoff] = v }, \filter1Res, { p[\filter1Res] = v },
+					\filter2Type, { p[\filter2Type] = v }, \filter2Cutoff, { p[\filter2Cutoff] = v }, \filter2Res, { p[\filter2Res] = v },
+					\filterRouting, { p[\filterRouting] = v },
+					\delayMix, { p[\delayMix] = v }, \delayTime, { p[\delayTime] = v }, \delayFb, { p[\delayFb] = v },
+					\reverbMix, { p[\reverbMix] = v }, \reverbRoom, { p[\reverbDecay] = v }, \reverbDamp, { p[\reverbDamp] = v },
+					\masterAmp, { p[\masterAmp] = v }, \rootMidi, { p[\rootMidi] = v }, \glide, { p[\glide] = v },
+					\atk, { p[\env1Atk] = v }, \rel, { p[\env1Rel] = v }
+				);
+			};
+			app[\presetStatus] = "Migrated legacy V2.1 archive into V3 controls";
+		};
+
+		app[\syncControls].value;
+		app[\refreshWaveData].value;
+		app[\updateAllVoices].value;
+		app[\maintainDrone].value;
+	};
+
+	app[\loadPreset] = {
+		Dialog.openPanel({ |path|
+			var obj;
+			if(path.notNil) {
+				obj = Object.readArchive(path);
+				app[\loadPresetObject].value(obj);
+			};
+		});
+	};
+
+	// --------------------------------------------------------
+	// Waveform data and visualization
+	// --------------------------------------------------------
+	app[\selectedPrefix] = { "gr" ++ (app[\selectedGran] ? 1) };
+	app[\selectedBuffer] = {
+		var p = app[\params];
+		var source = p[(app[\selectedPrefix].value ++ "Source").asSymbol] ? 0;
+		if(source == 1) { app[\liveBuf] } {
+			if((app[\selectedGran] ? 1) == 1) { app[\gr1Buf] } { app[\gr2Buf] }
+		}
+	};
+
+	app[\refreshWaveData] = {
+		var b = app[\selectedBuffer].value;
+		if(b.isNil) { app[\waveData] = FloatArray.newClear(0); ^nil };
+		b.loadToFloatArray(action: { |arr|
+			var targetSize = 2200;
+			var step, reduced, maxPeak;
+			if(arr.notNil and: { arr.size > 0 }) {
+				step = (arr.size / targetSize).max(1).asInteger;
+				reduced = FloatArray.newClear((arr.size / step).ceil.asInteger);
+				reduced.size.do { |i|
+					var start = i * step;
+					var stop = (start + step - 1).clip(start, arr.size - 1);
+					var peak = 0.0;
+					start.to(stop).do { |j| peak = peak.max(arr[j].abs) };
+					reduced[i] = peak;
+				};
+				maxPeak = reduced.maxItem ? 0.0;
+				if(maxPeak > 0.000001) { reduced = reduced.collect { |v| (v / maxPeak).clip(0, 1) } };
+				app[\waveData] = reduced;
+			} {
+				app[\waveData] = FloatArray.newClear(0);
+			};
+			app[\deferGui].value({ if(app[\waveView].notNil) { app[\waveView].refresh } });
+		});
+	};
+
+	app[\spawnVisualDots] = { |which|
+		var p = app[\params];
+		var prefix = "gr" ++ which;
+		var dots = if(which == 1) { app[\grainDots1] } { app[\grainDots2] };
+		var density = p[(prefix ++ "Density").asSymbol] ? 0.0;
+		var count = ((density / 12).ceil.asInteger).clip(1, 6);
+		var pos = p[(prefix ++ "Position").asSymbol] ? 0.5;
+		var jitter = p[(prefix ++ "Jitter").asSymbol] ? 0.0;
+		var loopStart = p[(prefix ++ "LoopStart").asSymbol] ? 0.0;
+		var loopEnd = p[(prefix ++ "LoopEnd").asSymbol] ? 1.0;
+		var loopLen = (loopEnd - loopStart).max(0.001);
+		if((p[\grainDotsOn] ? 1) == 1 and: { (p[(prefix ++ "On").asSymbol] ? 0) == 1 }) {
+			count.do {
+				dots.add((
+					x: (loopStart + (((pos + rrand(0 - jitter, jitter)).wrap(0, 1)) * loopLen)).clip(0, 1),
+					y: rrand(0.15, 0.85),
+					life: 1.0
+				));
+			};
+			while { dots.size > 80 } { dots.removeAt(0) };
+		};
+	};
+
+	app[\decayVisualDots] = {
+		[app[\grainDots1], app[\grainDots2]].do { |dots|
+			var remove = List.new;
+			dots.do { |dot, i|
+				dot[\life] = (dot[\life] - 0.16).max(0);
+				if(dot[\life] <= 0) { remove.add(i) };
+			};
+			remove.reverseDo { |i| dots.removeAt(i) };
+		};
+	};
+
+	app[\startVisualizer] = {
+		if(app[\visRunning] == true) { ^nil };
+		app[\visRunning] = true;
+		AppClock.sched(0.05, {
+			if(app.isNil or: { app[\visRunning] != true }) { ^nil };
+			app[\visTime] = app[\visTime] + 0.05;
+			app[\updateSeqPlayhead].value(0.05);
+			app[\decayVisualDots].value;
+			app[\spawnVisualDots].value(1);
+			app[\spawnVisualDots].value(2);
+			if(app[\waveView].notNil) { app[\waveView].refresh };
+			0.05
+		});
+	};
+	app[\stopVisualizer] = { app[\visRunning] = false };
+
+	// --------------------------------------------------------
+	// GUI helpers
+	// --------------------------------------------------------
+	makeModButton = { |parent, x, y, target|
+		var bt, label;
+		bt = Button(parent, Rect(x, y, 38, 20))
+			.states_([["Edit"]])
+			.action_({
+				app[\selectedModTarget] = target;
+				if(app[\menus][\modTargetSelect].notNil) {
+					app[\menus][\modTargetSelect].value = app[\modTargets].indexOfEqual(target) ? 0;
+				};
+				app[\showPage].value(8);
+				if(app[\refreshModEditor].notNil) { app[\refreshModEditor].value };
+			});
+		label = StaticText(parent, Rect(x + 42, y + 2, 34, 18)).string_("---").align_(\center);
+		app[\modIndicators][target] = label;
+	};
+
+	makeSliderRow = { |parent, x, y, label, key, minVal, maxVal, spec=\lin, decimals=3, modTarget=nil|
+		var sl, nb, norm;
+		StaticText(parent, Rect(x, y + 2, 108, 18)).string_(label);
+		sl = Slider(parent, Rect(x + 112, y, 210, 20));
+		nb = NumberBox(parent, Rect(x + 328, y, 72, 20)).decimals_(decimals);
+		norm = if(spec == \exp) {
+			app[\params][key].explin(minVal, maxVal, 0, 1).clip(0, 1)
+		} {
+			app[\params][key].linlin(minVal, maxVal, 0, 1).clip(0, 1)
+		};
+		sl.value_(norm);
+		nb.value_(app[\params][key]);
+		sl.action_({
+			var v = if(spec == \exp) { sl.value.linexp(0, 1, minVal, maxVal) } { sl.value.linlin(0, 1, minVal, maxVal) };
+			if(decimals == 0) { v = v.round(1).asInteger };
+			app[\params][key] = v;
+			nb.value = v;
+			app[\updateAllVoices].value;
+		});
 		nb.action_({
 			var v = nb.value.clip(minVal, maxVal);
-			var norm = if(spec == \exp) {
-				v.explin(minVal, maxVal, 0, 1)
-			} {
-				v.linlin(minVal, maxVal, 0, 1)
-			};
-
-			~granV21[\params][key] = v;
-			sl.value = norm;
-			~granV21[\updateAllVoices].value;
+			if(decimals == 0) { v = v.round(1).asInteger };
+			app[\params][key] = v;
+			sl.value = if(spec == \exp) { v.explin(minVal, maxVal, 0, 1) } { v.linlin(minVal, maxVal, 0, 1) };
+			app[\updateAllVoices].value;
 		});
-
-		~granV21[\sliders][key] = sl;
-		~granV21[\boxes][key] = nb;
-		~granV21[\setSliderAndBox].value(key, ~granV21[\params][key], minVal, maxVal, spec);
+		app[\sliders][key] = sl;
+		app[\sliderSpecs][key] = (min: minVal, max: maxVal, spec: spec);
+		app[\boxes][key] = nb;
+		if(modTarget.notNil) { makeModButton.value(parent, x + 408, y, modTarget) };
 	};
 
-	~granV21[\makeToggleRow] = { |parent, y, label, key|
+	makeSmallSliderRow = { |parent, x, y, label, key, minVal, maxVal, spec=\lin, decimals=3, modTarget=nil|
+		var sl, nb;
+		StaticText(parent, Rect(x, y + 2, 72, 18)).string_(label);
+		sl = Slider(parent, Rect(x + 76, y, 110, 20));
+		nb = NumberBox(parent, Rect(x + 192, y, 58, 20)).decimals_(decimals);
+		sl.value_(if(spec == \exp) { app[\params][key].explin(minVal, maxVal, 0, 1).clip(0, 1) } { app[\params][key].linlin(minVal, maxVal, 0, 1).clip(0, 1) });
+		nb.value_(app[\params][key]);
+		sl.action_({
+			var v = if(spec == \exp) { sl.value.linexp(0, 1, minVal, maxVal) } { sl.value.linlin(0, 1, minVal, maxVal) };
+			if(decimals == 0) { v = v.round(1).asInteger };
+			app[\params][key] = v;
+			nb.value = v;
+			app[\updateAllVoices].value;
+		});
+		nb.action_({
+			var v = nb.value.clip(minVal, maxVal);
+			if(decimals == 0) { v = v.round(1).asInteger };
+			app[\params][key] = v;
+			sl.value = if(spec == \exp) { v.explin(minVal, maxVal, 0, 1) } { v.linlin(minVal, maxVal, 0, 1) };
+			app[\updateAllVoices].value;
+		});
+		app[\sliders][key] = sl;
+		app[\sliderSpecs][key] = (min: minVal, max: maxVal, spec: spec);
+		app[\boxes][key] = nb;
+		if(modTarget.notNil) { makeModButton.value(parent, x + 258, y, modTarget) };
+	};
+
+	makeToggleRow = { |parent, x, y, label, key|
 		var bt;
-		StaticText(parent, Rect(12, y, 90, 20)).string_(label);
-
-		bt = Button(parent, Rect(105, y, 80, 22))
+		StaticText(parent, Rect(x, y + 2, 108, 18)).string_(label);
+		bt = Button(parent, Rect(x + 112, y, 76, 22))
 			.states_([["Off"], ["On"]])
-			.value_(~granV21[\params][key]);
+			.value_(app[\params][key] ? 0)
+			.action_({ |b|
+				app[\params][key] = b.value.asInteger;
+				if(key == \autoDrone) { app[\maintainDrone].value };
+				if(key == \sustainOn and: { b.value == 0 }) {
+					var releaseNotes = List.new;
+					app[\voices].keysValuesDo { |note, info|
+						if((info[\sustained] ? false) and: { (info[\held] ? false).not }) {
+							releaseNotes.add(note);
+						};
+					};
+					releaseNotes.do { |note| app[\releaseVoice].value(note) };
+				};
+				app[\updateAllVoices].value;
+			});
+		app[\toggles][key] = bt;
+	};
 
-		bt.action_({
-			~granV21[\params][key] = bt.value.asInteger;
-			~granV21[\updateAllVoices].value;
+	makeMenuRow = { |parent, x, y, label, key, items|
+		var pm;
+		StaticText(parent, Rect(x, y + 2, 108, 18)).string_(label);
+		pm = PopUpMenu(parent, Rect(x + 112, y, 160, 20))
+			.items_(items)
+			.value_(app[\params][key] ? 0)
+			.action_({ |menu|
+				app[\params][key] = menu.value;
+				app[\refreshWaveData].value;
+				app[\updateAllVoices].value;
+			});
+		app[\menus][key] = pm;
+	};
+
+	makeSmallMenuRow = { |parent, x, y, label, key, items|
+		var pm;
+		StaticText(parent, Rect(x, y + 2, 72, 18)).string_(label);
+		pm = PopUpMenu(parent, Rect(x + 76, y, 134, 20))
+			.items_(items)
+			.value_(app[\params][key] ? 0)
+			.action_({ |menu|
+				app[\params][key] = menu.value;
+				app[\updateAllVoices].value;
+			});
+		app[\menus][key] = pm;
+	};
+
+	app[\syncControls] = {
+		app[\deferGui].value({
+			var p = app[\params];
+			app[\sliders].keysValuesDo { |key, sl|
+				var nb = app[\boxes][key];
+				var val = p[key];
+				if(val.notNil) {
+					var meta = app[\sliderSpecs][key];
+					if(meta.notNil) {
+						sl.value = if(meta[\spec] == \exp) {
+							val.explin(meta[\min], meta[\max], 0, 1).clip(0, 1)
+						} {
+							val.linlin(meta[\min], meta[\max], 0, 1).clip(0, 1)
+						};
+					};
+					if(nb.notNil) { nb.value = val };
+				};
+			};
+			app[\toggles].keysValuesDo { |key, bt| if(p[key].notNil) { bt.value = p[key] } };
+			app[\menus].keysValuesDo { |key, pm| if(p[key].notNil and: { key != \modTargetSelect }) { pm.value = p[key] } };
+			app[\updateSeqPlayhead].value(0);
+			32.do { |i|
+				var key = ("seqStep" ++ (i + 1)).asSymbol;
+				var ctl = app[\seqStepControls][i];
+				if(ctl.notNil) { ctl.value_(p[key].linlin(-1, 1, 0, 1).clip(0, 1)) };
+			};
+			if(app[\menus][\xyXTargetMenu].notNil and: { app[\xyTargetSymbols].notNil }) {
+				app[\menus][\xyXTargetMenu].value = app[\xyTargetSymbols].indexOfEqual(p[\xyXTarget]) ? 0;
+			};
+			if(app[\menus][\xyYTargetMenu].notNil and: { app[\xyTargetSymbols].notNil }) {
+				app[\menus][\xyYTargetMenu].value = app[\xyTargetSymbols].indexOfEqual(p[\xyYTarget]) ? 0;
+			};
+			if(app[\menus][\waveGranSelect].notNil) {
+				app[\menus][\waveGranSelect].value = (app[\selectedGran] ? 1) - 1;
+			};
+			app[\updateStatus].value;
+			app[\updateModIndicators].value;
 		});
-
-		~granV21[\toggles][key] = bt;
 	};
 
 	// --------------------------------------------------------
-	// build buffer + midi
+	// GUI layout
 	// --------------------------------------------------------
-	~granV21[\allocLiveBuf].value;
-	~granV21[\allocFreezeBuf].value;
-	~granV21[\setupMIDI].value;
+	app[\win] = Window("Lemondrop Clone V3", Rect(60, 40, 1180, 820), resizable: false);
+	app[\win].background = Color.white;
+	app[\win].onClose_({ app[\free].value });
 
-	// --------------------------------------------------------
-	// GUI
-	// --------------------------------------------------------
-	~granV21[\win] = Window("Granular App V2.1", Rect(70, 50, 1120, 760), resizable: true);
-	~granV21[\win].background = Color.white;
+	Button(app[\win], Rect(14, 12, 96, 26)).states_([["Load GR1"]]).action_({ app[\loadGranulator].value(1) });
+	Button(app[\win], Rect(116, 12, 96, 26)).states_([["Load GR2"]]).action_({ app[\loadGranulator].value(2) });
+	Button(app[\win], Rect(218, 12, 128, 26)).states_([["Capture Live -> GR"]]).action_({ app[\captureLiveToSelected].value });
+	Button(app[\win], Rect(352, 12, 94, 26)).states_([["Save Preset"]]).action_({ app[\savePreset].value });
+	Button(app[\win], Rect(452, 12, 94, 26)).states_([["Load Preset"]]).action_({ app[\loadPreset].value });
+	Button(app[\win], Rect(552, 12, 74, 26)).states_([["Panic"]]).action_({ app[\panic].value });
+	app[\labels][\status] = StaticText(app[\win], Rect(642, 13, 520, 20)).align_(\left);
 
-	~granV21[\win].onClose_({
-		~granV21[\free].value;
-	});
+	app[\labels][\gr1Path] = StaticText(app[\win], Rect(14, 42, 540, 18)).align_(\left);
+	app[\labels][\gr2Path] = StaticText(app[\win], Rect(570, 42, 540, 18)).align_(\left);
 
-	// top bar
-	Button(~granV21[\win], Rect(16, 14, 110, 28))
-		.states_([["Load Sample"]])
-		.action_({ ~granV21[\loadSample].value });
+	app[\waveView] = UserView(app[\win], Rect(14, 66, 1148, 170)).background_(Color.white);
+	app[\waveView].drawFunc_({
+		var data = app[\waveData];
+		var p = app[\params];
+		var v = app[\view];
+		var b = app[\waveView].bounds;
+		var w, h, mid;
+		var zoom, visibleFrac, maxScroll, visStart, visEnd;
+		var prefix, regStart, regEnd, loopStart, loopEnd, pos;
+		var xFromNorm;
 
-	Button(~granV21[\win], Rect(132, 14, 95, 28))
-		.states_([["Save Preset"]])
-		.action_({ ~granV21[\savePreset].value });
+		w = b.width;
+		h = b.height;
+		mid = h * 0.5;
+		zoom = (v[\zoom] ? 1.0).clip(1, 64);
+		visibleFrac = (1 / zoom).clip(0.0001, 1);
+		maxScroll = (1 - visibleFrac).max(0);
+		visStart = ((v[\scroll] ? 0).clip(0, 1) * maxScroll);
+		visEnd = (visStart + visibleFrac).clip(0, 1);
+		prefix = app[\selectedPrefix].value;
+		regStart = p[(prefix ++ "RegionStart").asSymbol] ? 0.0;
+		regEnd = p[(prefix ++ "RegionEnd").asSymbol] ? 1.0;
+		loopStart = p[(prefix ++ "LoopStart").asSymbol] ? regStart;
+		loopEnd = p[(prefix ++ "LoopEnd").asSymbol] ? regEnd;
+		pos = p[(prefix ++ "Position").asSymbol] ? 0.5;
+		xFromNorm = { |n| ((n - visStart) / visibleFrac * w).clip(0, w) };
 
-	Button(~granV21[\win], Rect(233, 14, 95, 28))
-		.states_([["Load Preset"]])
-		.action_({ ~granV21[\loadPreset].value });
+		Pen.fillColor = Color.white; Pen.fillRect(Rect(0, 0, w, h));
+		Pen.color = Color.gray(0.75); Pen.moveTo(Point(0, mid)); Pen.lineTo(Point(w, mid)); Pen.stroke;
 
-	Button(~granV21[\win], Rect(334, 14, 85, 28))
-		.states_([["Rec In"]])
-		.action_({ ~granV21[\startRecording].value });
-
-	Button(~granV21[\win], Rect(425, 14, 90, 28))
-		.states_([["Stop Rec"]])
-		.action_({ ~granV21[\stopRecording].value });
-
-	~granV21[\playButton] = Button(~granV21[\win], Rect(521, 14, 80, 28))
-	.states_([["Play"], ["Stop"]])
-	.action_({ |bt|
-		if(bt.value == 1) {
-			~granV21[\previewOn].value;
-		} {
-			~granV21[\previewOff].value;
-		};
-	});
-
-	Button(~granV21[\win], Rect(607, 14, 75, 28))
-		.states_([["Panic"]])
-		.action_({
-			~granV21[\panic].value;
-			if(~granV21[\win].notNil) { ~granV21[\win].refresh };
-		});
-
-	~granV21[\pathLabel] = StaticText(~granV21[\win], Rect(695, 14, 395, 28))
-		.string_(~granV21[\samplePath])
-		.align_(\left);
-
-	// waveform
-	~granV21[\waveView] = UserView(~granV21[\win], Rect(16, 56, 1088, 188))
-	.background_(Color.white);
-
-	~granV21[\miniView] = UserView(~granV21[\win], Rect(16, 248, 1088, 28))
-	.background_(Color.white);
-
-
-	~granV21[\waveView].drawFunc_({
-	var data = ~granV21[\waveData];
-	var p = ~granV21[\params];
-	var v = ~granV21[\view];
-	var b = ~granV21[\waveView].bounds;
-	var w = b.width;
-	var h = b.height;
-	var mid = h * 0.5;
-
-	var zoom = (v[\zoom] ? 1.0).clip(1.0, 64.0);
-	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
-	var maxScroll = (1.0 - visibleFrac).max(0.0);
-	var scroll = (v[\scroll] ? 0.0).clip(0.0, 1.0) * maxScroll;
-	var visStart = scroll;
-	var visEnd = (scroll + visibleFrac).clip(0.0, 1.0);
-
-	var xFromNorm, x1, x2, xpos, lx1, lx2;
-	var startIndex, endIndex, visibleData;
-
-	var freezeOn, freezeAx, freezeBx, freezePosAAbs, freezePosBAbs;
-	var lockAOn, lockBOn;
-
-	xFromNorm = { |norm|
-		((norm - visStart) / visibleFrac * w).clip(0, w);
-	};
-
-	Pen.fillColor = Color.white;
-	Pen.fillRect(Rect(0, 0, w, h));
-
-	Pen.color = Color.gray(0.75);
-	Pen.moveTo(Point(0, mid));
-	Pen.lineTo(Point(w, mid));
-	Pen.stroke;
-
-	if(data.notNil and: { data.size > 1 }) {
-		startIndex = (visStart * (data.size - 1)).floor.asInteger.clip(0, data.size - 1);
-		endIndex = (visEnd * (data.size - 1)).ceil.asInteger.clip(startIndex + 1, data.size - 1);
-		visibleData = data.copyRange(startIndex, endIndex);
-
-		if(visibleData.notNil and: { visibleData.size > 1 }) {
+		if(data.notNil and: { data.size > 1 }) {
+			var startIndex = (visStart * (data.size - 1)).floor.asInteger.clip(0, data.size - 1);
+			var endIndex = (visEnd * (data.size - 1)).ceil.asInteger.clip(startIndex + 1, data.size - 1);
+			var visible = data.copyRange(startIndex, endIndex);
 			Pen.fillColor = Color(0.0, 0.45, 0.35);
-
-			visibleData.do { |val, i|
-				var normInView = i / (visibleData.size - 1).max(1);
-				var x = normInView * w;
-				var amp = (val.clip(0, 1).max(0.01)) * h * 0.42;
-
+			visible.do { |val, i|
+				var x = i.linlin(0, visible.size - 1, 0, w);
+				var amp = val.clip(0, 1) * h * 0.42;
 				Pen.fillRect(Rect(x, mid - amp, 1.0, amp * 2));
 			};
 		};
-	};
 
-	x1 = xFromNorm.value(p[\regionStart]);
-x2 = xFromNorm.value(p[\regionEnd]);
-
-lx1 = xFromNorm.value(v[\loopStart] ? 0.0);
-lx2 = xFromNorm.value(v[\loopEnd] ? 1.0);
-
-
-freezeOn = (p[\freezeOn] ? 0) == 1;
-lockAOn = (p[\freezeLockA] ? 0) == 1;
-lockBOn = (p[\freezeLockB] ? 0) == 1;
-
-freezePosAAbs = ((v[\loopStart] ? p[\regionStart]) + ((p[\freezePosA] ? 0.5).clip(0, 1) * ((v[\loopEnd] ? p[\regionEnd]) - (v[\loopStart] ? p[\regionStart])))).clip(0, 1);
-freezePosBAbs = ((v[\loopStart] ? p[\regionStart]) + ((p[\freezePosB] ? 0.5).clip(0, 1) * ((v[\loopEnd] ? p[\regionEnd]) - (v[\loopStart] ? p[\regionStart])))).clip(0, 1);
-
-freezeAx = xFromNorm.value(freezePosAAbs);
-freezeBx = xFromNorm.value(freezePosBAbs);
-
-
-	// region highlight only if visible
-	if((p[\regionEnd] > visStart) and: { p[\regionStart] < visEnd }) {
 		Pen.fillColor = Color.yellow.alpha_(0.14);
-		Pen.fillRect(Rect(x1, 0, (x2 - x1).max(1), h));
-	};
+		Pen.fillRect(Rect(xFromNorm.value(regStart), 0, (xFromNorm.value(regEnd) - xFromNorm.value(regStart)).max(1), h));
+		Pen.fillColor = Color(0.35, 0.7, 1.0).alpha_(0.12);
+		Pen.fillRect(Rect(xFromNorm.value(loopStart), 0, (xFromNorm.value(loopEnd) - xFromNorm.value(loopStart)).max(1), h));
 
-if(freezeOn) {
-	var flx1, flx2;
-	flx1 = xFromNorm.value((v[\loopStart] ? p[\regionStart]).clip(0, 1));
-	flx2 = xFromNorm.value((v[\loopEnd] ? p[\regionEnd]).clip(0, 1));
-
-	Pen.fillColor = Color(0.35, 0.7, 1.0).alpha_(0.10);
-	Pen.fillRect(Rect(flx1, 0, (flx2 - flx1).max(1), h));
-};
-
-	// region edges
-	Pen.color = Color(0.8, 0.65, 0.0);
-	if((p[\regionStart] >= visStart) and: { p[\regionStart] <= visEnd }) {
-		Pen.moveTo(Point(x1, 0)); Pen.lineTo(Point(x1, h)); Pen.stroke;
-	};
-	if((p[\regionEnd] >= visStart) and: { p[\regionEnd] <= visEnd }) {
-		Pen.moveTo(Point(x2, 0)); Pen.lineTo(Point(x2, h)); Pen.stroke;
-	};
-
-
-
-	// loop markers
-	Pen.color = Color.blue(0.3, 0.55);
-	if(((v[\loopStart] ? 0.0) >= visStart) and: { (v[\loopStart] ? 0.0) <= visEnd }) {
-		Pen.moveTo(Point(lx1, 0)); Pen.lineTo(Point(lx1, h)); Pen.stroke;
-	};
-	if(((v[\loopEnd] ? 1.0) >= visStart) and: { (v[\loopEnd] ? 1.0) <= visEnd }) {
-		Pen.moveTo(Point(lx2, 0)); Pen.lineTo(Point(lx2, h)); Pen.stroke;
-	};
-
-if(~granV21[\buf].notNil) {
-	var loopStart = (v[\loopStart] ? p[\regionStart]).clip(p[\regionStart], p[\regionEnd] - 0.001);
-	var loopEnd = (v[\loopEnd] ? p[\regionEnd]).clip(loopStart + 0.001, p[\regionEnd]);
-	var loopLen = (loopEnd - loopStart).max(0.001);
-
-	var aBasePos = p[\aPosition].clip(0, 1);
-	var bBasePos = p[\bPosition].clip(0, 1);
-
-	var aScan, bScan, aPosNorm, bPosNorm;
-	var aAbsNorm, bAbsNorm, aX, bX;
-	var aForwardNorm, bForwardNorm, aPingPongNorm, bPingPongNorm;
-	var aMode, bMode;
-	var aMinNorm, aMaxNorm, bMinNorm, bMaxNorm;
-	var aMinAbs, aMaxAbs, bMinAbs, bMaxAbs;
-	var aMinX, aMaxX, bMinX, bMaxX;
-
-	var drawLaneRect, drawWrappedForwardLane;
-
-	aMode = p[\aScanMode] ? 0;
-	bMode = p[\bScanMode] ? 0;
-
-	aScan = sin(~granV21[\visTime] * p[\aScanRate].max(0.001) * 2pi) * p[\aScanWidth].clip(0, 1);
-	bScan = sin(~granV21[\visTime] * p[\bScanRate].max(0.001) * 2pi) * p[\bScanWidth].clip(0, 1);
-
-	aForwardNorm = (aBasePos + (((~granV21[\visTime] * p[\aScanRate].max(0.001)) % 1.0) * p[\aScanWidth].clip(0, 1))).wrap(0, 1);
-	bForwardNorm = (bBasePos + (((~granV21[\visTime] * p[\bScanRate].max(0.001)) % 1.0) * p[\bScanWidth].clip(0, 1))).wrap(0, 1);
-
-	aPingPongNorm = (aBasePos + (sin(~granV21[\visTime] * p[\aScanRate].max(0.001) * pi) * p[\aScanWidth].clip(0, 1))).clip(0, 1);
-	bPingPongNorm = (bBasePos + (sin(~granV21[\visTime] * p[\bScanRate].max(0.001) * pi) * p[\bScanWidth].clip(0, 1))).clip(0, 1);
-
-	aPosNorm = if(aMode == 0) {
-		(aBasePos + aScan).clip(0, 1)
-	} {
-		if(aMode == 1) {
-			aForwardNorm
-		} {
-			aPingPongNorm
-		}
-	};
-
-	bPosNorm = if(bMode == 0) {
-		(bBasePos + bScan).clip(0, 1)
-	} {
-		if(bMode == 1) {
-			bForwardNorm
-		} {
-			bPingPongNorm
-		}
-	};
-
-	aMinNorm = if(aMode == 0) {
-		(aBasePos - p[\aScanWidth].clip(0, 1)).clip(0, 1)
-	} {
-		if(aMode == 1) {
-			aBasePos.clip(0, 1)
-		} {
-			(aBasePos - p[\aScanWidth].clip(0, 1)).clip(0, 1)
-		}
-	};
-
-	aMaxNorm = if(aMode == 0) {
-		(aBasePos + p[\aScanWidth].clip(0, 1)).clip(0, 1)
-	} {
-		if(aMode == 1) {
-			(aBasePos + p[\aScanWidth].clip(0, 1)).clip(0, 1)
-		} {
-			(aBasePos + p[\aScanWidth].clip(0, 1)).clip(0, 1)
-		}
-	};
-
-	bMinNorm = if(bMode == 0) {
-		(bBasePos - p[\bScanWidth].clip(0, 1)).clip(0, 1)
-	} {
-		if(bMode == 1) {
-			bBasePos.clip(0, 1)
-		} {
-			(bBasePos - p[\bScanWidth].clip(0, 1)).clip(0, 1)
-		}
-	};
-
-	bMaxNorm = if(bMode == 0) {
-		(bBasePos + p[\bScanWidth].clip(0, 1)).clip(0, 1)
-	} {
-		if(bMode == 1) {
-			(bBasePos + p[\bScanWidth].clip(0, 1)).clip(0, 1)
-		} {
-			(bBasePos + p[\bScanWidth].clip(0, 1)).clip(0, 1)
-		}
-	};
-
-	aAbsNorm = (loopStart + (aPosNorm * loopLen)).clip(0, 1);
-	bAbsNorm = (loopStart + (bPosNorm * loopLen)).clip(0, 1);
-
-	aMinAbs = (loopStart + (aMinNorm * loopLen)).clip(0, 1);
-	aMaxAbs = (loopStart + (aMaxNorm * loopLen)).clip(0, 1);
-	bMinAbs = (loopStart + (bMinNorm * loopLen)).clip(0, 1);
-	bMaxAbs = (loopStart + (bMaxNorm * loopLen)).clip(0, 1);
-
-	aX = xFromNorm.value(aAbsNorm);
-	bX = xFromNorm.value(bAbsNorm);
-	aMinX = xFromNorm.value(aMinAbs);
-	aMaxX = xFromNorm.value(aMaxAbs);
-	bMinX = xFromNorm.value(bMinAbs);
-	bMaxX = xFromNorm.value(bMaxAbs);
-
-	drawLaneRect = { |xStart, xEnd, yTop, laneH, fillColor, strokeColor|
-		var left = xStart.min(xEnd);
-		var width = (xEnd - xStart).abs.max(1);
-
-		if((left + width) >= 0 and: { left <= w }) {
-			Pen.fillColor = fillColor;
-			Pen.fillRect(Rect(left, yTop, width, laneH));
-
-			Pen.color = strokeColor;
-			Pen.addRect(Rect(left, yTop, width, laneH));
-			Pen.stroke;
-		};
-	};
-
-	drawWrappedForwardLane = { |basePos, scanWidth, yTop, laneH, fillColor, strokeColor|
-		var widthNorm = scanWidth.clip(0, 1);
-		var endNorm = basePos + widthNorm;
-		var firstStartAbs, firstEndAbs, secondStartAbs, secondEndAbs;
-		var firstX1, firstX2, secondX1, secondX2;
-
-		if(endNorm <= 1.0) {
-			firstStartAbs = loopStart + (basePos * loopLen);
-			firstEndAbs = loopStart + (endNorm * loopLen);
-
-			firstX1 = xFromNorm.value(firstStartAbs.clip(0, 1));
-			firstX2 = xFromNorm.value(firstEndAbs.clip(0, 1));
-
-			drawLaneRect.value(firstX1, firstX2, yTop, laneH, fillColor, strokeColor);
-		} {
-			firstStartAbs = loopStart + (basePos * loopLen);
-			firstEndAbs = loopEnd;
-
-			secondStartAbs = loopStart;
-			secondEndAbs = loopStart + (((endNorm - 1.0).clip(0, 1)) * loopLen);
-
-			firstX1 = xFromNorm.value(firstStartAbs.clip(0, 1));
-			firstX2 = xFromNorm.value(firstEndAbs.clip(0, 1));
-			secondX1 = xFromNorm.value(secondStartAbs.clip(0, 1));
-			secondX2 = xFromNorm.value(secondEndAbs.clip(0, 1));
-
-			drawLaneRect.value(firstX1, firstX2, yTop, laneH, fillColor, strokeColor);
-			drawLaneRect.value(secondX1, secondX2, yTop, laneH, fillColor, strokeColor);
-		};
-	};
-
-	// Gran A scan lane
-	if(aMode == 1) {
-		drawWrappedForwardLane.value(
-			aBasePos,
-			p[\aScanWidth],
-			h * 0.18,
-			h * 0.20,
-			Color.cyan.alpha_(0.10),
-			Color.cyan.alpha_(0.28)
-		);
-	} {
-		if((aMaxAbs >= visStart) and: { aMinAbs <= visEnd }) {
-			drawLaneRect.value(
-				aMinX,
-				aMaxX,
-				h * 0.18,
-				h * 0.20,
-				Color.cyan.alpha_(0.10),
-				Color.cyan.alpha_(0.28)
-			);
-		};
-	};
-
-	// Gran B scan lane
-	if(bMode == 1) {
-		drawWrappedForwardLane.value(
-			bBasePos,
-			p[\bScanWidth],
-			h * 0.62,
-			h * 0.20,
-			Color.magenta.alpha_(0.10),
-			Color.magenta.alpha_(0.28)
-		);
-	} {
-		if((bMaxAbs >= visStart) and: { bMinAbs <= visEnd }) {
-			drawLaneRect.value(
-				bMinX,
-				bMaxX,
-				h * 0.62,
-				h * 0.20,
-				Color.magenta.alpha_(0.10),
-				Color.magenta.alpha_(0.28)
-			);
-		};
-	};
-
-	// playheads on top
-	if((aAbsNorm >= visStart) and: { aAbsNorm <= visEnd }) {
-		Pen.color = Color.cyan.alpha_(0.95);
-		Pen.moveTo(Point(aX, h * 0.08));
-		Pen.lineTo(Point(aX, h * 0.92));
+		Pen.color = if(app[\selectedGran] == 1) { Color.cyan } { Color.magenta };
+		Pen.moveTo(Point(xFromNorm.value(loopStart + (pos * (loopEnd - loopStart).max(0.001))), 0));
+		Pen.lineTo(Point(xFromNorm.value(loopStart + (pos * (loopEnd - loopStart).max(0.001))), h));
 		Pen.stroke;
-	};
 
-	if((bAbsNorm >= visStart) and: { bAbsNorm <= visEnd }) {
-		Pen.color = Color.magenta.alpha_(0.95);
-		Pen.moveTo(Point(bX, h * 0.12));
-		Pen.lineTo(Point(bX, h * 0.88));
-		Pen.stroke;
-	};
-
-			if(freezeOn and: { freezePosAAbs >= visStart } and: { freezePosAAbs <= visEnd }) {
-	Pen.color = if(lockAOn) {
-		Color.cyan.alpha_(0.45)
-	} {
-		Color.cyan.alpha_(0.22)
-	};
-	Pen.moveTo(Point(freezeAx, h * 0.04));
-	Pen.lineTo(Point(freezeAx, h * 0.96));
-	Pen.stroke;
-};
-
-if(freezeOn and: { freezePosBAbs >= visStart } and: { freezePosBAbs <= visEnd }) {
-	Pen.color = if(lockBOn) {
-		Color.magenta.alpha_(0.45)
-	} {
-		Color.magenta.alpha_(0.22)
-	};
-	Pen.moveTo(Point(freezeBx, h * 0.04));
-	Pen.lineTo(Point(freezeBx, h * 0.96));
-	Pen.stroke;
-};
-};
-
-
-});
-
-
-	~granV21[\miniView].drawFunc_({
-	var data = ~granV21[\waveData];
-	var vw = ~granV21[\view];
-	var b = ~granV21[\miniView].bounds;
-	var w = b.width;
-	var h = b.height;
-	var mid = h * 0.5;
-
-	var zoom = (vw[\zoom] ? 1.0).clip(1.0, 64.0);
-	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
-	var maxScroll = (1.0 - visibleFrac).max(0.0);
-	var scroll = (vw[\scroll] ? 0.0).clip(0.0, 1.0) * maxScroll;
-	var visStart = scroll;
-	var visEnd = (scroll + visibleFrac).clip(0.0, 1.0);
-
-	Pen.fillColor = Color.white;
-	Pen.fillRect(Rect(0, 0, w, h));
-
-	Pen.color = Color.gray(0.82);
-	Pen.moveTo(Point(0, mid));
-	Pen.lineTo(Point(w, mid));
-	Pen.stroke;
-
-	if(data.notNil and: { data.size > 1 }) {
-		Pen.fillColor = Color(0.0, 0.45, 0.35);
-
-		data.do { |val, i|
-			var x = i.linlin(0, data.size - 1, 0, w);
-			var amp = val.clip(0, 1) * h * 0.42;
-			Pen.fillRect(Rect(x, mid - amp, 1.0, amp * 2));
+		[[app[\grainDots1], Color.cyan], [app[\grainDots2], Color.magenta]].do { |pair|
+			pair[0].do { |dot|
+				var x = xFromNorm.value(dot[\x]);
+				var y = dot[\y] * h;
+				Pen.fillColor = pair[1].alpha_(dot[\life].clip(0, 1));
+				Pen.fillOval(Rect.aboutPoint(Point(x, y), 4, 4));
+			};
 		};
-	};
+	});
 
-	// viewport box
-	Pen.fillColor = Color.gray(0.3).alpha_(0.15);
-	Pen.fillRect(Rect(visStart * w, 0, ((visEnd - visStart) * w).max(2), h));
+	app[\waveView].mouseDownAction_({ |view, x, y, modifiers, buttonNumber, clickCount|
+		var p, v, prefix, w, zoom, visibleFrac, maxScroll, norm, mode;
 
-	Pen.color = Color.gray(0.25);
-	Pen.addRect(Rect(visStart * w, 0, ((visEnd - visStart) * w).max(2), h));
-	Pen.stroke;
-
-
-		if((~granV21[\params][\freezeOn] ? 0) == 1) {
-	var loopStartMini, loopEndMini;
-
-	loopStartMini = ((~granV21[\view][\loopStart] ? ~granV21[\params][\regionStart]).clip(0, 1)) * w;
-	loopEndMini = ((~granV21[\view][\loopEnd] ? ~granV21[\params][\regionEnd]).clip(0, 1)) * w;
-
-	Pen.fillColor = Color(0.35, 0.7, 1.0).alpha_(0.14);
-	Pen.fillRect(Rect(loopStartMini, 0, (loopEndMini - loopStartMini).max(1), h));
-
-	Pen.color = Color(0.35, 0.7, 1.0).alpha_(0.35);
-	Pen.addRect(Rect(loopStartMini, 0, (loopEndMini - loopStartMini).max(1), h));
-	Pen.stroke;
-};
-});
-
-
-	~granV21[\miniView].mouseDownAction_({ |view, x, y|
-	var vw = ~granV21[\view];
-	var w = view.bounds.width;
-
-	var zoom = (vw[\zoom] ? 1.0).clip(1.0, 64.0);
-	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
-	var maxScroll = (1.0 - visibleFrac).max(0.0);
-
-	var currentStart = ((vw[\scroll] ? 0.0).clip(0, 1)) * maxScroll;
-	var currentWidth = visibleFrac;
-	var boxX = currentStart * w;
-	var boxW = (currentWidth * w).max(2);
-
-	if((x >= boxX) and: { x <= (boxX + boxW) }) {
-		~granV21[\miniDrag] = true;
-		~granV21[\miniDragOffset] = x - boxX;
-	} {
-		if(maxScroll > 0) {
-			var targetStart = ((x / w) - (visibleFrac * 0.5)).clip(0, maxScroll);
-			vw[\scroll] = (targetStart / maxScroll).clip(0, 1);
+		p = app[\params];
+		v = app[\view];
+		prefix = app[\selectedPrefix].value;
+		w = view.bounds.width;
+		zoom = (v[\zoom] ? 1.0).clip(1, 64);
+		visibleFrac = (1 / zoom).clip(0.0001, 1);
+		maxScroll = (1 - visibleFrac).max(0);
+		norm = (((v[\scroll] ? 0) * maxScroll) + ((x / w).clip(0, 1) * visibleFrac)).clip(0, 1);
+		mode = v[\editMode] ? \position;
+		if(clickCount >= 2) {
+			p[(prefix ++ "RegionStart").asSymbol] = 0.0; p[(prefix ++ "RegionEnd").asSymbol] = 1.0;
+			p[(prefix ++ "LoopStart").asSymbol] = 0.0; p[(prefix ++ "LoopEnd").asSymbol] = 1.0;
+			p[(prefix ++ "Position").asSymbol] = 0.5;
 		} {
-			vw[\scroll] = 0.0;
-		};
-
-		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-		view.refresh;
-	};
-});
-
-~granV21[\miniView].mouseMoveAction_({ |view, x, y|
-	var vw = ~granV21[\view];
-	var w = view.bounds.width;
-
-	var zoom = (vw[\zoom] ? 1.0).clip(1.0, 64.0);
-	var visibleFrac = (1.0 / zoom).clip(0.0001, 1.0);
-	var maxScroll = (1.0 - visibleFrac).max(0.0);
-
-	if(~granV21[\miniDrag] == true) {
-		if(maxScroll > 0) {
-			var targetStart = ((x - (~granV21[\miniDragOffset] ? 0.0)) / w).clip(0, 1);
-			targetStart = targetStart.clip(0, 1.0 - visibleFrac);
-			vw[\scroll] = (targetStart / maxScroll).clip(0, 1);
-		} {
-			vw[\scroll] = 0.0;
-		};
-
-		if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-		view.refresh;
-	};
-});
-
-~granV21[\miniView].mouseUpAction_({
-	~granV21[\miniDrag] = false;
-	~granV21[\miniDragOffset] = 0.0;
-});
-
-
-~granV21[\waveView].mouseDownAction_({ |view, x, y, modifiers, buttonNumber, clickCount|
-	var p = ~granV21[\params];
-	var vw = ~granV21[\view];
-	var m = ~granV21[\getWaveMetrics].value(view);
-
-	var normVisible = (x / m[\w]).clip(0, 1);
-	var norm = (m[\visStart] + (normVisible * m[\visibleFrac])).clip(0, 1);
-
-	var aDistPx = (x - m[\aX]).abs;
-	var bDistPx = (x - m[\bX]).abs;
-	var startDistPx = (x - m[\startX]).abs;
-	var endDistPx = (x - m[\endX]).abs;
-
-	var loopStartX = m[\xFromNorm].value(vw[\loopStart] ? 0.0);
-	var loopEndX = m[\xFromNorm].value(vw[\loopEnd] ? 1.0);
-	var loopStartDistPx = (x - loopStartX).abs;
-	var loopEndDistPx = (x - loopEndX).abs;
-
-	var playheadHitRadius = ~granV21[\playheadHitRadius] ? 24;
-	var edgeHitPx = 12;
-	var loopHitPx = 12;
-	var mode = vw[\editMode] ? \region;
-
-	if(clickCount >= 2) {
-		switch(mode,
-			\region, {
-				p[\regionStart] = 0.0;
-				p[\regionEnd] = 1.0;
-				p[\aPosition] = 0.5;
-				p[\bPosition] = 0.5;
-			},
-			\loop, {
-				vw[\loopStart] = 0.0;
-				vw[\loopEnd] = 1.0;
-			},
-			\scroll, {
-				vw[\scroll] = 0.0;
-				vw[\zoom] = 1.0;
-			}
-		);
-
-		~granV21[\dragMode] = \none;
-		~granV21[\dragTarget] = \none;
-		~granV21[\updateAllVoices].value;
-
-		{
-			view.refresh;
-			if(~granV21[\win].notNil) { ~granV21[\win].refresh };
-		}.defer;
-
-		^nil;
-	};
-
-	switch(mode,
-
-		\region, {
-			if((aDistPx <= playheadHitRadius) or: { bDistPx <= playheadHitRadius }) {
-				if(aDistPx <= bDistPx) {
-					~granV21[\dragMode] = \aPosition;
-					~granV21[\dragTarget] = \aPosition;
-				} {
-					~granV21[\dragMode] = \bPosition;
-					~granV21[\dragTarget] = \bPosition;
-				};
-			} {
-				if(startDistPx <= edgeHitPx) {
-					~granV21[\dragMode] = \regionStart;
-					~granV21[\dragTarget] = \regionStart;
-				} {
-					if(endDistPx <= edgeHitPx) {
-						~granV21[\dragMode] = \regionEnd;
-						~granV21[\dragTarget] = \regionEnd;
+			switch(mode,
+				\region, {
+					if(norm < ((p[(prefix ++ "RegionStart").asSymbol] + p[(prefix ++ "RegionEnd").asSymbol]) * 0.5)) {
+						p[(prefix ++ "RegionStart").asSymbol] = norm.clip(0, p[(prefix ++ "RegionEnd").asSymbol] - 0.01);
 					} {
-						~granV21[\dragMode] = \none;
-						~granV21[\dragTarget] = \none;
+						p[(prefix ++ "RegionEnd").asSymbol] = norm.clip(p[(prefix ++ "RegionStart").asSymbol] + 0.01, 1);
+					};
+				},
+				\loop, {
+					if(norm < ((p[(prefix ++ "LoopStart").asSymbol] + p[(prefix ++ "LoopEnd").asSymbol]) * 0.5)) {
+						p[(prefix ++ "LoopStart").asSymbol] = norm.clip(p[(prefix ++ "RegionStart").asSymbol], p[(prefix ++ "LoopEnd").asSymbol] - 0.01);
+					} {
+						p[(prefix ++ "LoopEnd").asSymbol] = norm.clip(p[(prefix ++ "LoopStart").asSymbol] + 0.01, p[(prefix ++ "RegionEnd").asSymbol]);
+					};
+				},
+				\scroll, { v[\scroll] = norm.clip(0, 1) },
+				{
+					var ls = p[(prefix ++ "LoopStart").asSymbol] ? 0;
+					var le = p[(prefix ++ "LoopEnd").asSymbol] ? 1;
+					p[(prefix ++ "Position").asSymbol] = ((norm - ls) / (le - ls).max(0.001)).clip(0, 1);
+				}
+			);
+		};
+		app[\syncControls].value;
+		app[\updateAllVoices].value;
+	});
+
+	// Wave controls
+	StaticText(app[\win], Rect(14, 242, 86, 18)).string_("Wave GR");
+	app[\menus][\waveGranSelect] = PopUpMenu(app[\win], Rect(84, 240, 70, 20)).items_(["GR1", "GR2"]).value_(0).action_({ |pm|
+		app[\selectedGran] = pm.value + 1;
+		app[\refreshWaveData].value;
+	});
+	StaticText(app[\win], Rect(164, 242, 42, 18)).string_("Mode");
+	PopUpMenu(app[\win], Rect(204, 240, 104, 20)).items_(["position", "region", "loop", "scroll"]).value_(0).action_({ |pm|
+		app[\view][\editMode] = [\position, \region, \loop, \scroll][pm.value];
+	});
+	StaticText(app[\win], Rect(318, 242, 42, 18)).string_("Zoom");
+	Slider(app[\win], Rect(358, 242, 140, 16)).value_(0).action_({ |sl|
+		app[\view][\zoom] = sl.value.linexp(0, 1, 1, 32);
+		app[\waveView].refresh;
+	});
+	StaticText(app[\win], Rect(508, 242, 44, 18)).string_("Scroll");
+	Slider(app[\win], Rect(552, 242, 140, 16)).value_(0).action_({ |sl|
+		app[\view][\scroll] = sl.value.clip(0, 1);
+		app[\waveView].refresh;
+	});
+	makeToggleRow.value(app[\win], 720, 238, "Grain Dots", \grainDotsOn);
+	app[\labels][\presetStatus] = StaticText(app[\win], Rect(920, 240, 240, 20)).align_(\left);
+
+	pageNames = ["Sample", "GR1", "GR2", "OSC", "Filters", "ENV", "LFO/SEQ", "FX", "Mod Matrix", "MIDI/Perform"];
+	pageNames.do { |name, i|
+		var bt = Button(app[\win], Rect(14 + (i * 114), 270, 108, 26))
+			.states_([[name], [name]])
+			.action_({ app[\showPage].value(i) });
+		app[\tabButtons].add(bt);
+	};
+
+	app[\showPage] = { |index|
+		app[\pages].do { |page, i| page.visible = (i == index) };
+		app[\tabButtons].do { |bt, i| bt.value = if(i == index) { 1 } { 0 } };
+	};
+
+	// Sample page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 460, 20)).string_("Sample / Global / Live History");
+		makeSliderRow.value(page, 12, 42, "Master", \masterAmp, 0, 1, \lin, 3, \masterAmp);
+		makeSliderRow.value(page, 12, 72, "Root MIDI", \rootMidi, 24, 96, \lin, 0);
+		makeSliderRow.value(page, 12, 102, "Glide", \glide, 0.001, 1.0, \exp, 3);
+		makeSliderRow.value(page, 12, 132, "BPM", \bpm, 40, 250, \lin, 1);
+		makeMenuRow.value(page, 12, 162, "Clock", \clockSource, ["Internal", "MIDI Clock"]);
+		makeToggleRow.value(page, 12, 202, "Auto Drone", \autoDrone);
+		makeSliderRow.value(page, 12, 232, "Drone Note", \droneNote, 24, 96, \lin, 0);
+		makeSliderRow.value(page, 12, 262, "Drone Vel", \droneVelocity, 1, 127, \lin, 0);
+		Button(page, Rect(520, 42, 120, 26)).states_([["Load GR1 File"]]).action_({ app[\loadGranulator].value(1) });
+		Button(page, Rect(650, 42, 120, 26)).states_([["Load GR2 File"]]).action_({ app[\loadGranulator].value(2) });
+		Button(page, Rect(780, 42, 168, 26)).states_([["Capture Live to Selected"]]).action_({ app[\captureLiveToSelected].value });
+		StaticText(page, Rect(520, 88, 530, 70))
+			.string_("Live history records continuously into a 30 second buffer. Set GR1 or GR2 Source to Live History to granulate the incoming signal, or capture the history into the selected file buffer.");
+		StaticText(page, Rect(520, 164, 530, 56))
+			.string_("Auto Drone starts one sustained voice when a sample is loaded or live history is captured. Turn it off for strict MIDI-triggered behavior.");
+		StaticText(page, Rect(12, 334, 1020, 90))
+			.string_("V3 preset schema saves params, per-granulator sample paths, modulation slots, MIDI settings, sequencer steps, tempo, and visible GUI state. Legacy V2.1 archives are migrated by mapping A/B granulator, oscillator, filters, delay, reverb, master, root, glide, attack, and release settings into the new controls.");
+		app[\pages].add(page);
+	}.value;
+
+	makeGranPage = { |which|
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		var prefix = "gr" ++ which;
+		var x1, x2;
+		x1 = 12;
+		x2 = 565;
+		StaticText(page, Rect(12, 8, 220, 20)).string_("Granulator " ++ which);
+		Button(page, Rect(250, 8, 108, 24)).states_([["Load File"]]).action_({ app[\loadGranulator].value(which) });
+		Button(page, Rect(368, 8, 150, 24)).states_([["Select Waveform"]]).action_({
+			app[\selectedGran] = which;
+			app[\refreshWaveData].value;
+		});
+		makeToggleRow.value(page, x1, 42, "On", (prefix ++ "On").asSymbol);
+		makeMenuRow.value(page, x1, 72, "Source", (prefix ++ "Source").asSymbol, sourceItems);
+		makeSliderRow.value(page, x1, 102, "Level", (prefix ++ "Amp").asSymbol, 0, 1, \lin, 3, (prefix ++ "Amp").asSymbol);
+		makeSliderRow.value(page, x1, 132, "Pitch", (prefix ++ "Pitch").asSymbol, -36, 36, \lin, 2, (prefix ++ "Pitch").asSymbol);
+		makeSliderRow.value(page, x1, 162, "Detune", (prefix ++ "Detune").asSymbol, -1, 1, \lin, 3);
+		makeSliderRow.value(page, x1, 192, "Position", (prefix ++ "Position").asSymbol, 0, 1, \lin, 3, (prefix ++ "Position").asSymbol);
+		makeSliderRow.value(page, x1, 222, "Live Pos", (prefix ++ "LivePosition").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x1, 252, "Density", (prefix ++ "Density").asSymbol, 0.5, 120, \exp, 3, (prefix ++ "Density").asSymbol);
+		makeSliderRow.value(page, x1, 282, "Grain Count", (prefix ++ "GrainCount").asSymbol, 1, 16, \lin, 0);
+		makeSliderRow.value(page, x1, 312, "Grain Size", (prefix ++ "GrainSize").asSymbol, 0.005, 1.5, \exp, 4, (prefix ++ "GrainSize").asSymbol);
+		makeSliderRow.value(page, x1, 342, "Window", (prefix ++ "Window").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x2, 42, "Jitter", (prefix ++ "Jitter").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x2, 72, "Pan Random", (prefix ++ "PanRand").asSymbol, 0, 1, \lin, 3, (prefix ++ "PanRand").asSymbol);
+		makeSliderRow.value(page, x2, 102, "Rate", (prefix ++ "Rate").asSymbol, -2, 2, \lin, 3);
+		makeMenuRow.value(page, x2, 132, "Rate Sync", (prefix ++ "RateSync").asSymbol, ["Free", "Sync"]);
+		makeMenuRow.value(page, x2, 162, "Rate Div", (prefix ++ "RateDiv").asSymbol, syncDivItems);
+		makeMenuRow.value(page, x2, 192, "Play Mode", (prefix ++ "PlayMode").asSymbol, ["Fixed", "Moving"]);
+		makeMenuRow.value(page, x2, 222, "Loop Mode", (prefix ++ "LoopMode").asSymbol, ["Off", "Forward", "PingPong"]);
+		makeToggleRow.value(page, x2, 252, "Preserve Atk", (prefix ++ "PreserveAttack").asSymbol);
+		makeMenuRow.value(page, x2, 282, "Pattern", (prefix ++ "Pattern").asSymbol, ["Even", "Random", "Burst"]);
+		makeSliderRow.value(page, x2, 322, "Region Start", (prefix ++ "RegionStart").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x2, 352, "Region End", (prefix ++ "RegionEnd").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x2, 382, "Loop Start", (prefix ++ "LoopStart").asSymbol, 0, 1, \lin, 3);
+		makeSliderRow.value(page, x2, 412, "Loop End", (prefix ++ "LoopEnd").asSymbol, 0, 1, \lin, 3);
+		app[\pages].add(page);
+	};
+	makeGranPage.value(1);
+	makeGranPage.value(2);
+
+	// OSC page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("Waveform Oscillator");
+		makeToggleRow.value(page, 12, 42, "OSC On", \oscOn);
+		makeMenuRow.value(page, 12, 72, "Wave", \oscWave, waveItems);
+		makeSliderRow.value(page, 12, 102, "Level", \oscAmp, 0, 1, \lin, 3, \oscAmp);
+		makeSliderRow.value(page, 12, 132, "Pitch", \oscPitch, -36, 36, \lin, 2, \oscPitch);
+		makeSliderRow.value(page, 12, 162, "Detune", \oscDetune, -1, 1, \lin, 3);
+		makeSliderRow.value(page, 12, 192, "Pulse Width", \oscPulseWidth, 0.05, 0.95, \lin, 3);
+		makeSliderRow.value(page, 12, 222, "Cutoff", \oscCutoff, 80, 20000, \exp, 1, \oscCutoff);
+		makeSliderRow.value(page, 12, 252, "Resonance", \oscRes, 0, 0.95, \lin, 3);
+		app[\pages].add(page);
+	}.value;
+
+	// Filters page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("Dual Filters");
+		makeMenuRow.value(page, 12, 42, "Filter 1 Type", \filter1Type, filterItems);
+		makeSliderRow.value(page, 12, 72, "F1 Cutoff", \filter1Cutoff, 20, 20400, \exp, 1, \filter1Cutoff);
+		makeSliderRow.value(page, 12, 102, "F1 Res", \filter1Res, 0, 0.95, \lin, 3);
+		makeSliderRow.value(page, 12, 132, "F1 Width", \filter1Width, 0, 1, \lin, 3);
+		makeMenuRow.value(page, 12, 192, "Filter 2 Type", \filter2Type, filterItems);
+		makeSliderRow.value(page, 12, 222, "F2 Cutoff", \filter2Cutoff, 20, 20400, \exp, 1, \filter2Cutoff);
+		makeSliderRow.value(page, 12, 252, "F2 Res", \filter2Res, 0, 0.95, \lin, 3);
+		makeSliderRow.value(page, 12, 282, "F2 Width", \filter2Width, 0, 1, \lin, 3);
+		makeMenuRow.value(page, 560, 42, "Routing", \filterRouting, ["Series", "Parallel"]);
+		StaticText(page, Rect(560, 88, 460, 110)).string_("Series sends Filter 1 into Filter 2. Parallel processes the raw signal through both filters and mixes the outputs.");
+		app[\pages].add(page);
+	}.value;
+
+	// ENV page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("ENV1 Amp / ENV2 Mod");
+		makeSliderRow.value(page, 12, 42, "ENV1 Attack", \env1Atk, 0.001, 4, \exp, 3);
+		makeSliderRow.value(page, 12, 72, "ENV1 Decay", \env1Dec, 0.001, 4, \exp, 3);
+		makeSliderRow.value(page, 12, 102, "ENV1 Sustain", \env1Sus, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 12, 132, "ENV1 Release", \env1Rel, 0.001, 8, \exp, 3);
+		makeSliderRow.value(page, 12, 162, "ENV1 Velocity", \env1Vel, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 560, 42, "ENV2 Attack", \env2Atk, 0.001, 4, \exp, 3);
+		makeSliderRow.value(page, 560, 72, "ENV2 Decay", \env2Dec, 0.001, 4, \exp, 3);
+		makeSliderRow.value(page, 560, 102, "ENV2 Sustain", \env2Sus, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 560, 132, "ENV2 Release", \env2Rel, 0.001, 8, \exp, 3);
+		makeSliderRow.value(page, 560, 162, "ENV2 Depth", \env2Depth, 0, 1, \lin, 3);
+		app[\pages].add(page);
+	}.value;
+
+	// LFO / SEQ page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("LFO / Bar Sequencer");
+		makeLfoBlock = { |x, y, idx|
+			var prefix = "lfo" ++ idx;
+			StaticText(page, Rect(x, y, 110, 20)).string_("LFO " ++ idx);
+			makeSmallMenuRow.value(page, x, y + 30, "Shape", (prefix ++ "Shape").asSymbol, lfoShapeItems);
+			makeSmallSliderRow.value(page, x, y + 60, "Rate", (prefix ++ "Rate").asSymbol, 0.001, 20, \exp, 3);
+			makeSmallMenuRow.value(page, x, y + 90, "Sync", (prefix ++ "Sync").asSymbol, ["Free", "Sync"]);
+			makeSmallMenuRow.value(page, x, y + 120, "Div", (prefix ++ "Div").asSymbol, syncDivItems);
+			makeSmallSliderRow.value(page, x, y + 150, "Depth", (prefix ++ "Depth").asSymbol, 0, 1, \lin, 3);
+			makeToggleRow.value(page, x, y + 180, "Reset", (prefix ++ "Reset").asSymbol);
+			makeToggleRow.value(page, x, y + 210, "On", (prefix ++ "On").asSymbol);
+		};
+		makeLfoBlock.value(12, 38, 1);
+		makeLfoBlock.value(330, 38, 2);
+		makeToggleRow.value(page, 650, 42, "SEQ On", \seqOn);
+		makeSliderRow.value(page, 650, 72, "Steps", \seqSteps, 2, 32, \lin, 0);
+		makeSliderRow.value(page, 650, 102, "Rate", \seqRate, 0.1, 32, \exp, 3);
+		makeMenuRow.value(page, 650, 132, "Sync", \seqSync, ["Free", "Sync"]);
+		makeMenuRow.value(page, 650, 162, "Div", \seqDiv, syncDivItems);
+		makeToggleRow.value(page, 650, 192, "Key Trigger", \seqKeyTrig);
+		makeToggleRow.value(page, 650, 222, "Quantize", \seqQuantize);
+		makeSliderRow.value(page, 650, 252, "SEQ Depth", \seqDepth, 0, 1, \lin, 3, \seqDepth);
+		app[\labels][\seqStatus] = StaticText(page, Rect(650, 286, 260, 20)).string_("Current Step: Off").align_(\left);
+		StaticText(page, Rect(12, 310, 220, 20)).string_("Sequencer Steps");
+		makeSeqStepControls = {
+			32.do { |i|
+				var x = 12 + ((i % 16) * 69);
+				var y = 340 + (((i / 16).floor.asInteger) * 62);
+				var key = ("seqStep" ++ (i + 1)).asSymbol;
+				var sl, label;
+				label = StaticText(page, Rect(x, y, 34, 16)).string_((i + 1).asString);
+				sl = Slider(page, Rect(x, y + 18, 52, 16)).value_(app[\params][key].linlin(-1, 1, 0, 1));
+				sl.action_({
+					app[\params][key] = sl.value.linlin(0, 1, -1, 1);
+					app[\updateAllVoices].value;
+				});
+				app[\seqStepLabels].add(label);
+				app[\seqStepControls].add(sl);
+			};
+		};
+		makeSeqStepControls.value;
+		app[\pages].add(page);
+	}.value;
+
+	// FX page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("FX1 -> FX2 -> Compressor");
+		makeMenuRow.value(page, 12, 42, "FX1 Type", \fx1Type, fx1Items);
+		makeSliderRow.value(page, 12, 72, "FX1 Mix", \fx1Mix, 0, 1, \lin, 3, \fx1Mix);
+		makeSliderRow.value(page, 12, 102, "FX1 Rate", \fx1Rate, 0.01, 8, \exp, 3);
+		makeSliderRow.value(page, 12, 132, "FX1 Depth", \fx1Depth, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 12, 162, "FX1 Drive", \fx1Drive, 0, 1, \lin, 3);
+		makeMenuRow.value(page, 560, 42, "FX2 Type", \fx2Type, fx2Items);
+		makeMenuRow.value(page, 560, 72, "FX2 Order", \fx2Order, ["Delay -> Reverb", "Reverb -> Delay"]);
+		makeSliderRow.value(page, 560, 102, "Delay Mix", \delayMix, 0, 1, \lin, 3, \delayMix);
+		makeSliderRow.value(page, 560, 132, "Delay Time", \delayTime, 0.001, 4, \exp, 3);
+		makeMenuRow.value(page, 560, 162, "Delay Sync", \delaySync, ["Free", "Sync"]);
+		makeMenuRow.value(page, 560, 192, "Delay Div", \delayDiv, syncDivItems);
+		makeSliderRow.value(page, 560, 222, "Delay FB", \delayFb, 0, 0.95, \lin, 3);
+		makeSliderRow.value(page, 560, 252, "Delay Filter", \delayFilter, 80, 20000, \exp, 1);
+		makeToggleRow.value(page, 560, 282, "Ping Pong", \delayPingPong);
+		makeSliderRow.value(page, 12, 232, "Reverb Mix", \reverbMix, 0, 1, \lin, 3, \reverbMix);
+		makeSliderRow.value(page, 12, 262, "Pre Delay", \reverbPreDelay, 0, 0.5, \lin, 3);
+		makeSliderRow.value(page, 12, 292, "Decay", \reverbDecay, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 12, 322, "Damp", \reverbDamp, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 560, 352, "Live -> FX", \liveInputToFx, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 560, 382, "Compressor", \compressorAmt, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 560, 412, "Comp Output", \compressorOut, 0, 2, \lin, 3);
+		app[\pages].add(page);
+	}.value;
+
+	// Mod Matrix page
+	{
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		var slotMenus = Array.newClear(3);
+		var slotAmts = Array.newClear(3);
+		var slotBoxes = Array.newClear(3);
+		var slotCcs = Array.newClear(3);
+		StaticText(page, Rect(12, 8, 220, 20)).string_("Modulation Matrix");
+		StaticText(page, Rect(12, 42, 90, 20)).string_("Target");
+		app[\menus][\modTargetSelect] = PopUpMenu(page, Rect(106, 42, 220, 20))
+			.items_(app[\modTargetLabels])
+			.value_(0)
+			.action_({ |pm|
+				app[\selectedModTarget] = app[\modTargets][pm.value];
+				app[\refreshModEditor].value;
+			});
+		3.do { |si|
+			var y = 86 + (si * 70);
+			StaticText(page, Rect(12, y, 80, 20)).string_("Slot " ++ (si + 1));
+			slotMenus[si] = PopUpMenu(page, Rect(106, y, 150, 20)).items_(modSourceItems);
+			slotAmts[si] = Slider(page, Rect(270, y, 180, 20));
+			slotBoxes[si] = NumberBox(page, Rect(460, y, 60, 20)).decimals_(3);
+			slotCcs[si] = NumberBox(page, Rect(590, y, 56, 20)).decimals_(0);
+			StaticText(page, Rect(535, y + 2, 46, 18)).string_("CC");
+			Button(page, Rect(660, y, 92, 22)).states_([["Learn CC"]]).action_({
+				app[\learnSlotIndex] = si;
+				app[\presetStatus] = "Move a MIDI CC for " ++ app[\selectedModTarget].asString ++ " slot " ++ (si + 1);
+				app[\updateStatus].value;
+			});
+			slotMenus[si].action_({ |pm|
+				app[\modSlots][app[\selectedModTarget]][si][\source] = pm.value;
+				app[\updateAllVoices].value;
+			});
+			slotAmts[si].action_({
+				var v = slotAmts[si].value.linlin(0, 1, -1, 1);
+				app[\modSlots][app[\selectedModTarget]][si][\amount] = v;
+				slotBoxes[si].value = v;
+				app[\updateAllVoices].value;
+			});
+			slotBoxes[si].action_({
+				var v = slotBoxes[si].value.clip(-1, 1);
+				app[\modSlots][app[\selectedModTarget]][si][\amount] = v;
+				slotAmts[si].value = v.linlin(-1, 1, 0, 1);
+				app[\updateAllVoices].value;
+			});
+			slotCcs[si].action_({
+				app[\modSlots][app[\selectedModTarget]][si][\cc] = slotCcs[si].value.asInteger.clip(0, 127);
+				app[\updateAllVoices].value;
+			});
+		};
+		app[\labels][\activeMods] = StaticText(page, Rect(12, 320, 1050, 150)).align_(\left);
+		app[\refreshModEditor] = {
+			app[\deferGui].value({
+				var target = app[\selectedModTarget];
+				var activeLines = List.new;
+				if(app[\menus][\modTargetSelect].notNil) {
+					app[\menus][\modTargetSelect].value = app[\modTargets].indexOfEqual(target) ? 0;
+				};
+				3.do { |si|
+					var slot = app[\modSlots][target][si];
+					slotMenus[si].value = slot[\source] ? 0;
+					slotAmts[si].value = (slot[\amount] ? 0.0).linlin(-1, 1, 0, 1);
+					slotBoxes[si].value = slot[\amount] ? 0.0;
+					slotCcs[si].value = slot[\cc] ? 1;
+				};
+				app[\modTargets].do { |t, ti|
+					app[\modSlots][t].do { |slot, si|
+						if(((slot[\source] ? 0) != 0) and: { (slot[\amount] ? 0.0).abs > 0.0001 }) {
+							activeLines.add(app[\modTargetLabels][ti] ++ " slot " ++ (si + 1) ++ ": " ++ modSourceItems[slot[\source] ? 0] ++ " amt " ++ (slot[\amount] ? 0.0).round(0.001) ++ " cc " ++ (slot[\cc] ? 1));
+						};
 					};
 				};
-			};
-		},
-
-		\loop, {
-			if(loopStartDistPx <= loopHitPx) {
-				~granV21[\dragMode] = \loopStart;
-				~granV21[\dragTarget] = \loopStart;
-			} {
-				if(loopEndDistPx <= loopHitPx) {
-					~granV21[\dragMode] = \loopEnd;
-					~granV21[\dragTarget] = \loopEnd;
-				} {
-					~granV21[\dragMode] = \none;
-					~granV21[\dragTarget] = \none;
+				if(app[\labels][\activeMods].notNil) {
+					app[\labels][\activeMods].string_("Active routings:\n" ++ if(activeLines.size == 0) { "None" } { activeLines.asArray.join("\n") });
 				};
-			};
-		},
-
-		\scroll, {
-			~granV21[\dragMode] = \scroll;
-			~granV21[\dragTarget] = \scroll;
-			~granV21[\dragScrollStart] = x;
-			~granV21[\dragScrollOrigin] = vw[\scroll] ? 0.0;
-		}
-	);
-
-	view.refresh;
-});
-
-
-	~granV21[\waveView].mouseMoveAction_({ |view, x, y|
-	var p = ~granV21[\params];
-	var vw = ~granV21[\view];
-	var m = ~granV21[\getWaveMetrics].value(view);
-	var normVisible = (x / m[\w]).clip(0, 1);
-	var norm = (m[\visStart] + (normVisible * m[\visibleFrac])).clip(0, 1);
-
-	var maxScroll;
-	var deltaPx;
-	var deltaNorm;
-
-	switch(~granV21[\dragTarget],
-
-		\regionStart, {
-	p[\regionStart] = norm.clip(0, p[\regionEnd] - 0.01);
-
-	vw[\loopStart] = (vw[\loopStart] ? p[\regionStart]).clip(p[\regionStart], p[\regionEnd] - 0.01);
-	vw[\loopEnd] = (vw[\loopEnd] ? p[\regionEnd]).clip(vw[\loopStart] + 0.01, p[\regionEnd]);
-},
-
-\regionEnd, {
-	p[\regionEnd] = norm.clip(p[\regionStart] + 0.01, 1.0);
-
-	vw[\loopStart] = (vw[\loopStart] ? p[\regionStart]).clip(p[\regionStart], p[\regionEnd] - 0.01);
-	vw[\loopEnd] = (vw[\loopEnd] ? p[\regionEnd]).clip(vw[\loopStart] + 0.01, p[\regionEnd]);
-},
-
-\aPosition, {
-	p[\aPosition] = ((norm - m[\loopStart]) / (m[\loopEnd] - m[\loopStart]).max(0.001)).clip(0, 1);
-	if((p[\freezeLockA] ? 0) == 0) {
-		p[\freezePosA] = p[\aPosition];
-	};
-},
-
-\bPosition, {
-	p[\bPosition] = ((norm - m[\loopStart]) / (m[\loopEnd] - m[\loopStart]).max(0.001)).clip(0, 1);
-	if((p[\freezeLockB] ? 0) == 0) {
-		p[\freezePosB] = p[\bPosition];
-	};
-},
-
-		\loopStart, {
-	vw[\loopStart] = norm.clip(p[\regionStart], (vw[\loopEnd] ? p[\regionEnd]) - 0.01);
-},
-
-\loopEnd, {
-	vw[\loopEnd] = norm.clip((vw[\loopStart] ? p[\regionStart]) + 0.01, p[\regionEnd]);
-},
-
-		\scroll, {
-			maxScroll = (1.0 - m[\visibleFrac]).max(0.0);
-
-			if(maxScroll > 0) {
-				deltaPx = x - (~granV21[\dragScrollStart] ? x);
-				deltaNorm = deltaPx / m[\w];
-				vw[\scroll] = ((~granV21[\dragScrollOrigin] ? 0.0) - (deltaNorm / maxScroll)).clip(0, 1);
-			};
-		}
-	);
-
-	~granV21[\updateAllVoices].value;
-	view.refresh;
-});
-
-~granV21[\waveView].mouseUpAction_({
-	~granV21[\dragMode] = \none;
-	~granV21[\dragTarget] = \none;
-	~granV21[\dragScrollStart] = 0.0;
-	~granV21[\dragScrollOrigin] = 0.0;
-});
-
-
-
-
-
-	// tabs
-	    ["Sample", "Gran A", "Gran B", "Osc", "Filters", "FX", "Mod", "Perform"].do { |name, i|
-		var bt = Button(~granV21[\win], Rect(16 + (i * 118), 292, 108, 26))
-			.states_([[name], [name]])
-			.action_({ ~granV21[\showPage].value(i) });
-
-		~granV21[\tabButtons].add(bt);
-	};
-
-	// page 1 - Sample
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 380, 20)).string_("Sample / Region / Envelope / Recording");
-		StaticText(page, Rect(12, 38, 980, 18)).string_("Edit Mode: region = drag yellow edges + cyan/magenta playheads | loop = drag blue markers | scroll = drag waveform to pan | double-click resets current mode.");
-
-		StaticText(page, Rect(12, 68, 42, 18)).string_("Zoom");
-Slider(page, Rect(58, 70, 180, 16))
-	.value_(0.0)
-	.action_({ |sl|
-	~granV21[\view][\zoom] = sl.value.linexp(0, 1, 1, 32);
-	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-});
-
-StaticText(page, Rect(255, 68, 42, 18)).string_("Scroll");
-Slider(page, Rect(305, 70, 180, 16))
-	.value_(0.0)
-	.action_({ |sl|
-	~granV21[\view][\scroll] = sl.value.clip(0, 1);
-	if(~granV21[\waveView].notNil) { ~granV21[\waveView].refresh };
-	if(~granV21[\miniView].notNil) { ~granV21[\miniView].refresh };
-});
-
-StaticText(page, Rect(505, 68, 68, 18)).string_("Edit Mode");
-PopUpMenu(page, Rect(575, 66, 120, 20))
-	.items_(["region", "loop", "scroll"])
-	.value_(0)
-	.action_({ |pm|
-		~granV21[\view][\editMode] = [\region, \loop, \scroll][pm.value];
-	});
-
-		~granV21[\makeSliderRow].value(page, 108, "Master",    \masterAmp, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 138, "Root MIDI", \rootMidi, 24, 96, \lin, 0);
-~granV21[\makeSliderRow].value(page, 168, "Glide",     \glide, 0.001, 1.0, \exp, 3);
-~granV21[\makeSliderRow].value(page, 198, "Attack",    \atk, 0.001, 2, \exp, 3);
-~granV21[\makeSliderRow].value(page, 228, "Release",   \rel, 0.001, 4, \exp, 3);
-
-StaticText(page, Rect(500, 108, 90, 20)).string_("Preview Note");
-NumberBox(page, Rect(595, 108, 70, 20))
-	.value_(~granV21[\previewNote])
-	.decimals_(0)
-	.action_({ |nb|
-		~granV21[\previewNote] = nb.value.asInteger.clip(24, 96);
-		if(~granV21[\previewSynth].notNil) {
-			try {
-				~granV21[\previewSynth].set(\gate, 0);
-			} { };
-			~granV21[\previewSynth] = Synth(
-				\granVoiceV21,
-				~granV21[\voiceArgs].value(~granV21[\previewNote])
-			);
+			});
 		};
-		if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-	});
-
-StaticText(page, Rect(12, 270, 190, 20)).string_("Live Buffer Length (sec)");
-NumberBox(page, Rect(205, 270, 90, 20))
-			.value_(~granV21[\recordSeconds])
-			.decimals_(2)
-			.action_({ |nb|
-			~granV21[\recordSeconds] = nb.value.clip(1.0, 60.0);
-~granV21[\allocLiveBuf].value;
-~granV21[\allocFreezeBuf].value;
-			});
-
-		StaticText(page, Rect(12, 305, 900, 95))
-			.string_(
-				"Version 2.1 notes:\n"
-				++ "• MIDI note-on creates a new voice.\n"
-				++ "• MIDI note-off releases that note's voice.\n"
-				++ "• UI edits update all currently held notes.\n"
-				++ "• Preview button plays a local test note without MIDI.\n"
-				++ "• Panic kills all active voices if anything gets stuck."
-			);
-
-		~granV21[\pages].add(page);
+		app[\pages].add(page);
 	}.value;
 
-	// page 2 - Gran A
+	// MIDI / Perform page
 	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("Granulator A");
-		~granV21[\makeToggleRow].value(page, 45, "A On", \aOn);
-		~granV21[\makeSliderRow].value(page, 75,  "A Amp", \aAmp, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 105, "A Pos", \aPosition, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 135, "Density", \aDensity, 0.5, 80, \exp, 3);
-~granV21[\makeSliderRow].value(page, 165, "Dur", \aDur, 0.005, 1.0, \exp, 4);
-~granV21[\makeSliderRow].value(page, 195, "Jitter", \aJitter, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 225, "RateMul", \aRateMul, -2, 2, \lin, 3);
-~granV21[\makeSliderRow].value(page, 255, "RateRand", \aRateRand, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 285, "ScanRate", \aScanRate, 0.001, 6, \exp, 3);
-~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \aScanWidth, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 345, "PanWidth", \aPanWidth, 0, 1, \lin, 3);
-
-StaticText(page, Rect(12, 375, 90, 20)).string_("Scan Mode");
-~granV21[\menus][\aScanMode] = PopUpMenu(page, Rect(105, 375, 120, 20))
-	.items_(["Center", "Forward", "PingPong"])
-	.value_(~granV21[\params][\aScanMode] ? 0)
-	.action_({ |pm|
-		~granV21[\params][\aScanMode] = pm.value;
-		~granV21[\updateAllVoices].value;
-	});
-
-		~granV21[\pages].add(page);
-	}.value;
-
-	// page 3 - Gran B
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("Granulator B");
-		~granV21[\makeToggleRow].value(page, 45, "B On", \bOn);
-		~granV21[\makeSliderRow].value(page, 75,  "B Amp", \bAmp, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 105, "B Pos", \bPosition, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 135, "Density", \bDensity, 0.5, 80, \exp, 3);
-~granV21[\makeSliderRow].value(page, 165, "Dur", \bDur, 0.005, 1.0, \exp, 4);
-~granV21[\makeSliderRow].value(page, 195, "Jitter", \bJitter, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 225, "RateMul", \bRateMul, -2, 2, \lin, 3);
-~granV21[\makeSliderRow].value(page, 255, "RateRand", \bRateRand, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 285, "ScanRate", \bScanRate, 0.001, 6, \exp, 3);
-~granV21[\makeSliderRow].value(page, 315, "ScanWidth", \bScanWidth, 0, 1, \lin, 3);
-~granV21[\makeSliderRow].value(page, 345, "PanWidth", \bPanWidth, 0, 1, \lin, 3);
-
-StaticText(page, Rect(12, 375, 90, 20)).string_("Scan Mode");
-~granV21[\menus][\bScanMode] = PopUpMenu(page, Rect(105, 375, 120, 20))
-	.items_(["Center", "Forward", "PingPong"])
-	.value_(~granV21[\params][\bScanMode] ? 0)
-	.action_({ |pm|
-		~granV21[\params][\bScanMode] = pm.value;
-		~granV21[\updateAllVoices].value;
-	});
-
-		~granV21[\pages].add(page);
-	}.value;
-
-	// page 4 - OSC
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("Oscillator / Tone");
-		~granV21[\makeToggleRow].value(page, 45, "Osc On", \oscOn);
-		~granV21[\makeSliderRow].value(page, 75,  "Osc Amp", \oscAmp, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 105, "Detune", \oscDetune, -24, 24, \lin, 2);
-		~granV21[\makeSliderRow].value(page, 135, "Cutoff", \oscCutoff, 100, 18000, \exp, 1);
-		~granV21[\makeSliderRow].value(page, 165, "Res", \oscRes, 0, 0.95, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 225, "HPF", \hpf, 20, 8000, \exp, 1);
-		~granV21[\makeSliderRow].value(page, 255, "LPF", \lpf, 100, 20000, \exp, 1);
-
-		StaticText(page, Rect(12, 195, 70, 20)).string_("Wave");
-		~granV21[\menus][\oscWave] = PopUpMenu(page, Rect(105, 195, 120, 20))
-			.items_(["Sine", "Saw", "Pulse", "Tri"])
-			.value_(~granV21[\params][\oscWave])
-			.action_({ |pm|
-				~granV21[\params][\oscWave] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		~granV21[\pages].add(page);
-	}.value;
-
-
-
-		// page 5 - Filter
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("Dual Filters");
-
-		// Filter 1
-		StaticText(page, Rect(12, 45, 120, 20)).string_("Filter 1 Type");
-		~granV21[\menus][\filter1Type] = PopUpMenu(page, Rect(105, 45, 140, 20))
-			.items_(["Bypass", "Lowpass", "Highpass", "Bandpass"])
-			.value_(~granV21[\params][\filter1Type] ? 0)
-			.action_({ |pm|
-				~granV21[\params][\filter1Type] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		~granV21[\makeSliderRow].value(page, 80,  "F1 Cutoff", \filter1Cutoff, 20, 20000, \exp, 1);
-		~granV21[\makeSliderRow].value(page, 110, "F1 Res",    \filter1Res, 0, 0.95, \lin, 3);
-
-		// Filter 2
-		StaticText(page, Rect(12, 165, 120, 20)).string_("Filter 2 Type");
-		~granV21[\menus][\filter2Type] = PopUpMenu(page, Rect(105, 165, 140, 20))
-			.items_(["Bypass", "Lowpass", "Highpass", "Bandpass"])
-			.value_(~granV21[\params][\filter2Type] ? 0)
-			.action_({ |pm|
-				~granV21[\params][\filter2Type] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		~granV21[\makeSliderRow].value(page, 200, "F2 Cutoff", \filter2Cutoff, 20, 20000, \exp, 1);
-		~granV21[\makeSliderRow].value(page, 230, "F2 Res",    \filter2Res, 0, 0.95, \lin, 3);
-
-		// Routing
-		StaticText(page, Rect(12, 290, 120, 20)).string_("Routing");
-		~granV21[\menus][\filterRouting] = PopUpMenu(page, Rect(105, 290, 140, 20))
-			.items_(["Series", "Parallel"])
-			.value_(~granV21[\params][\filterRouting] ? 0)
-			.action_({ |pm|
-				~granV21[\params][\filterRouting] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		StaticText(page, Rect(560, 45, 430, 180))
-			.string_(
-				"Filter routing:\n"
-				++ "• Series = Filter 1 feeds Filter 2\n"
-				++ "• Parallel = both filters process the raw signal, then are mixed\n\n"
-				++ "Suggested settings:\n"
-				++ "• LP -> LP in series for darker sculpted tones\n"
-				++ "• HP + LP in parallel for band-limited texture\n"
-				++ "• Bypass one filter to use the other on its own"
-			);
-
-		~granV21[\pages].add(page);
-	}.value;
-
-
-		// page 6 - FX
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("FX Bus");
-
-		// Delay
-		StaticText(page, Rect(12, 45, 120, 20)).string_("Delay");
-		~granV21[\makeToggleRow].value(page, 70, "Delay On", \delayOn);
-		~granV21[\makeSliderRow].value(page, 100, "Dly Mix",  \delayMix, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 130, "Dly Time", \delayTime, 0.001, 1.5, \exp, 3);
-		~granV21[\makeSliderRow].value(page, 160, "Dly FB",   \delayFb, 0, 0.95, \lin, 3);
-
-		// Reverb
-		StaticText(page, Rect(12, 220, 120, 20)).string_("Reverb");
-		~granV21[\makeToggleRow].value(page, 245, "Rev On",   \reverbOn);
-		~granV21[\makeSliderRow].value(page, 275, "Rev Mix",  \reverbMix, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 305, "Room",     \reverbRoom, 0, 1, \lin, 3);
-		~granV21[\makeSliderRow].value(page, 335, "Damp",     \reverbDamp, 0, 1, \lin, 3);
-
-
-
-		// Order
-		StaticText(page, Rect(12, 365, 120, 20)).string_("FX Order");
-		~granV21[\menus][\fxOrder] = PopUpMenu(page, Rect(105, 365, 180, 20))
-			.items_(["Delay -> Reverb", "Reverb -> Delay"])
-			.value_(~granV21[\params][\fxOrder] ? 0)
-			.action_({ |pm|
-				~granV21[\params][\fxOrder] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		StaticText(page, Rect(560, 85, 430, 180))
-			.string_(
-				"Suggested FX use:\n"
-				++ "• Short delay + medium reverb = spacious plucks\n"
-				++ "• High feedback + low reverb = dubby looping texture\n"
-				++ "• Reverb before delay = smeared ambient repeats\n"
-				++ "• Delay before reverb = cleaner echoes into space"
-			);
-
-		~granV21[\pages].add(page);
-	}.value;
-
-
-
-		// page 7 - Mod
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-
-		var destItems;
-		var makeTinySliderRow, makeTinyMenuRow, makeTinyToggleRow;
-		var col1X, col2X, col3X, col4X, topY;
-
-		destItems = [
-			"Gran A Position",
-			"Gran B Position",
-			"Filter 1 Cutoff",
-			"Filter 2 Cutoff",
-			"Delay Mix",
-			"Gran A Density",
-			"Gran B Density",
-			"Gran A Scan Width",
-			"Gran B Scan Width",
-			"Osc Cutoff",
-			"Master Amp"
+		var page = CompositeView(app[\win], Rect(14, 306, 1148, 500)).background_(Color.white);
+		var targets = [
+			[\gr1Position, "GR1 Position"], [\gr2Position, "GR2 Position"],
+			[\gr1Jitter, "GR1 Jitter"], [\gr2Jitter, "GR2 Jitter"],
+			[\gr1Density, "GR1 Density"], [\gr2Density, "GR2 Density"],
+			[\filter1Cutoff, "F1 Cutoff"], [\filter2Cutoff, "F2 Cutoff"],
+			[\oscCutoff, "OSC Cutoff"], [\masterAmp, "Master"]
 		];
-
-		col1X = 18;
-		col2X = 286;
-		col3X = 556;
-		col4X = 826;
-		topY = 38;
-
-		makeTinySliderRow = { |parent, x, y, label, key, minVal, maxVal, spec=\lin, decimals=3|
-			var lbl, sl, nb;
-
-			lbl = StaticText(parent, Rect(x, y + 2, 46, 18)).string_(label);
-
-			sl = Slider(parent, Rect(x + 50, y, 92, 20));
-			nb = NumberBox(parent, Rect(x + 148, y, 54, 20)).decimals_(decimals);
-
-			sl.action_({
-				var v = if(spec == \exp) {
-					sl.value.linexp(0, 1, minVal, maxVal)
-				} {
-					sl.value.linlin(0, 1, minVal, maxVal)
-				};
-
-				~granV21[\params][key] = v;
-				nb.value = v;
-				~granV21[\updateAllVoices].value;
-			});
-
-			nb.action_({
-				var v = nb.value.clip(minVal, maxVal);
-				var norm = if(spec == \exp) {
-					v.explin(minVal, maxVal, 0, 1)
-				} {
-					v.linlin(minVal, maxVal, 0, 1)
-				};
-
-				~granV21[\params][key] = v;
-				sl.value = norm;
-				~granV21[\updateAllVoices].value;
-			});
-
-			~granV21[\sliders][key] = sl;
-			~granV21[\boxes][key] = nb;
-			~granV21[\setSliderAndBox].value(key, ~granV21[\params][key], minVal, maxVal, spec);
-		};
-
-		makeTinyMenuRow = { |parent, x, y, label, key|
-			var lbl, pm;
-
-			lbl = StaticText(parent, Rect(x, y + 2, 46, 18)).string_(label);
-
-			pm = PopUpMenu(parent, Rect(x + 50, y, 152, 20))
-				.items_(destItems)
-				.value_(~granV21[\params][key] ? 0)
-				.action_({ |menu|
-					~granV21[\params][key] = menu.value;
-					~granV21[\updateAllVoices].value;
-				});
-
-			~granV21[\menus][key] = pm;
-		};
-
-		makeTinyToggleRow = { |parent, x, y, label, key|
-			var lbl, bt;
-
-			lbl = StaticText(parent, Rect(x, y + 2, 46, 18)).string_(label);
-
-			bt = Button(parent, Rect(x + 50, y, 74, 22))
-				.states_([["Off"], ["On"]])
-				.value_(~granV21[\params][key])
-				.action_({ |b|
-					~granV21[\params][key] = b.value.asInteger;
-					~granV21[\updateAllVoices].value;
-				});
-
-			~granV21[\toggles][key] = bt;
-		};
-
-		StaticText(page, Rect(12, 10, 140, 20)).string_("Modulation");
-
-		~granV21[\modLfoToggleLabel] = StaticText(page, Rect(180, 10, 92, 20))
-	.string_("LFO View");
-
-		Button(page, Rect(306, 8, 92, 24))
-			.states_([["LFO 1"], ["LFO 2"]])
-			.value_(0)
-			.action_({ |bt|
-				~granV21[\modUi][\lfoIndex] = if(bt.value == 0) { 1 } { 2 };
-				~granV21[\refreshModLfoUi].value;
-			});
-
-		// ------------------------------------------------
-		// COLUMN 1 : DISPLAYED LFO CORE
-		// ------------------------------------------------
-		~granV21[\modLfoTitle] = StaticText(page, Rect(col1X, topY, 140, 20)).string_("LFO 1");
-
-		StaticText(page, Rect(col1X, topY + 30, 46, 18)).string_("On");
-		~granV21[\toggles][\modLfoOn] = Button(page, Rect(col1X + 50, topY + 28, 74, 22))
-			.states_([["Off"], ["On"]])
-			.value_(~granV21[\params][\lfo1On])
-			.action_({ |b|
-				var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-				~granV21[\params][(prefix ++ "On").asSymbol] = b.value.asInteger;
-				~granV21[\updateAllVoices].value;
-			});
-
-		makeTinySliderRow.value(page, col1X, topY + 58, "Rate", \lfo1Rate, 0.001, 20, \exp, 3);
-		~granV21[\sliders][\modLfoRate] = ~granV21[\sliders].removeAt(\lfo1Rate);
-		~granV21[\boxes][\modLfoRate] = ~granV21[\boxes].removeAt(\lfo1Rate);
-
-		~granV21[\sliders][\modLfoRate].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoRate].value.linexp(0, 1, 0.001, 20);
-			~granV21[\params][(prefix ++ "Rate").asSymbol] = v;
-			~granV21[\boxes][\modLfoRate].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoRate].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoRate].value.clip(0.001, 20);
-			~granV21[\params][(prefix ++ "Rate").asSymbol] = v;
-			~granV21[\sliders][\modLfoRate].value = v.explin(0.001, 20, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col1X, topY + 88, "Depth", \lfo1Depth, 0, 1, \lin, 3);
-		~granV21[\sliders][\modLfoDepth] = ~granV21[\sliders].removeAt(\lfo1Depth);
-		~granV21[\boxes][\modLfoDepth] = ~granV21[\boxes].removeAt(\lfo1Depth);
-
-		~granV21[\sliders][\modLfoDepth].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoDepth].value.linlin(0, 1, 0, 1);
-			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
-			~granV21[\boxes][\modLfoDepth].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoDepth].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoDepth].value.clip(0, 1);
-			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
-			~granV21[\sliders][\modLfoDepth].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-
-		StaticText(page, Rect(col1X, topY + 120, 46, 18)).string_("Shape");
-		~granV21[\menus][\modLfoShape] = PopUpMenu(page, Rect(col1X + 50, topY + 118, 126, 20))
-			.items_(["Sine", "Tri", "Saw", "Pulse"])
-			.value_(~granV21[\params][\lfo1Shape] ? 0)
-			.action_({ |pm|
-				var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-				~granV21[\params][(prefix ++ "Shape").asSymbol] = pm.value;
-				~granV21[\updateAllVoices].value;
-			});
-
-		// ------------------------------------------------
-		// COLUMN 2 : DISPLAYED LFO ROUTING
-		// ------------------------------------------------
-		~granV21[\modLfoRoutingTitle] = StaticText(page, Rect(col2X, topY, 160, 20)).string_("LFO 1 Routing");
-
-		makeTinyMenuRow.value(page, col2X, topY + 28, "Dest 1", \lfo1Dest1);
-		~granV21[\menus][\modLfoDest1] = ~granV21[\menus].removeAt(\lfo1Dest1);
-		~granV21[\menus][\modLfoDest1].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			~granV21[\params][(prefix ++ "Dest1").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col2X, topY + 56, "Amt 1", \lfo1Amt1, -1, 1, \lin, 3);
-		~granV21[\sliders][\modLfoAmt1] = ~granV21[\sliders].removeAt(\lfo1Amt1);
-		~granV21[\boxes][\modLfoAmt1] = ~granV21[\boxes].removeAt(\lfo1Amt1);
-
-		~granV21[\sliders][\modLfoAmt1].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoAmt1].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
-			~granV21[\boxes][\modLfoAmt1].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoAmt1].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoAmt1].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
-			~granV21[\sliders][\modLfoAmt1].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col2X, topY + 96, "Dest 2", \lfo1Dest2);
-		~granV21[\menus][\modLfoDest2] = ~granV21[\menus].removeAt(\lfo1Dest2);
-		~granV21[\menus][\modLfoDest2].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			~granV21[\params][(prefix ++ "Dest2").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col2X, topY + 124, "Amt 2", \lfo1Amt2, -1, 1, \lin, 3);
-		~granV21[\sliders][\modLfoAmt2] = ~granV21[\sliders].removeAt(\lfo1Amt2);
-		~granV21[\boxes][\modLfoAmt2] = ~granV21[\boxes].removeAt(\lfo1Amt2);
-
-		~granV21[\sliders][\modLfoAmt2].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoAmt2].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
-			~granV21[\boxes][\modLfoAmt2].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoAmt2].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoAmt2].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
-			~granV21[\sliders][\modLfoAmt2].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col2X, topY + 164, "Dest 3", \lfo1Dest3);
-		~granV21[\menus][\modLfoDest3] = ~granV21[\menus].removeAt(\lfo1Dest3);
-		~granV21[\menus][\modLfoDest3].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			~granV21[\params][(prefix ++ "Dest3").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col2X, topY + 192, "Amt 3", \lfo1Amt3, -1, 1, \lin, 3);
-		~granV21[\sliders][\modLfoAmt3] = ~granV21[\sliders].removeAt(\lfo1Amt3);
-		~granV21[\boxes][\modLfoAmt3] = ~granV21[\boxes].removeAt(\lfo1Amt3);
-
-		~granV21[\sliders][\modLfoAmt3].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoAmt3].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
-			~granV21[\boxes][\modLfoAmt3].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoAmt3].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoAmt3].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
-			~granV21[\sliders][\modLfoAmt3].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col2X, topY + 232, "Dest 4", \lfo1Dest4);
-		~granV21[\menus][\modLfoDest4] = ~granV21[\menus].removeAt(\lfo1Dest4);
-		~granV21[\menus][\modLfoDest4].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			~granV21[\params][(prefix ++ "Dest4").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col2X, topY + 260, "Amt 4", \lfo1Amt4, -1, 1, \lin, 3);
-		~granV21[\sliders][\modLfoAmt4] = ~granV21[\sliders].removeAt(\lfo1Amt4);
-		~granV21[\boxes][\modLfoAmt4] = ~granV21[\boxes].removeAt(\lfo1Amt4);
-
-		~granV21[\sliders][\modLfoAmt4].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\sliders][\modLfoAmt4].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
-			~granV21[\boxes][\modLfoAmt4].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modLfoAmt4].action_({
-			var prefix = if((~granV21[\modUi][\lfoIndex] ? 1) == 1) { "lfo1" } { "lfo2" };
-			var v = ~granV21[\boxes][\modLfoAmt4].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
-			~granV21[\sliders][\modLfoAmt4].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-				// ------------------------------------------------
-		// COLUMN 3 : DISPLAYED MOD ENV CORE
-		// ------------------------------------------------
-		~granV21[\modEnvTitle] = StaticText(page, Rect(col3X, topY, 160, 20)).string_("Mod Env 1");
-
-	~granV21[\modEnvToggleLabel] = StaticText(page, Rect(730, 10, 92, 20))
-	.string_("Env View");
-
-Button(page, Rect(856, 8, 92, 24))
-	.states_([["Env 1"], ["Env 2"]])
-	.value_(0)
-	.action_({ |bt|
-		~granV21[\modUi][\envIndex] = if(bt.value == 0) { 1 } { 2 };
-		~granV21[\refreshModEnvUi].value;
-	});
-
-		makeTinySliderRow.value(page, col3X, topY + 28, "Atk", \modEnv1Atk, 0.001, 4, \exp, 3);
-		~granV21[\sliders][\modEnvAtk] = ~granV21[\sliders].removeAt(\modEnv1Atk);
-		~granV21[\boxes][\modEnvAtk] = ~granV21[\boxes].removeAt(\modEnv1Atk);
-
-		~granV21[\sliders][\modEnvAtk].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvAtk].value.linexp(0, 1, 0.001, 4);
-			~granV21[\params][(prefix ++ "Atk").asSymbol] = v;
-			~granV21[\boxes][\modEnvAtk].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvAtk].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvAtk].value.clip(0.001, 4);
-			~granV21[\params][(prefix ++ "Atk").asSymbol] = v;
-			~granV21[\sliders][\modEnvAtk].value = v.explin(0.001, 4, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col3X, topY + 58, "Dec", \modEnv1Dec, 0.001, 4, \exp, 3);
-		~granV21[\sliders][\modEnvDec] = ~granV21[\sliders].removeAt(\modEnv1Dec);
-		~granV21[\boxes][\modEnvDec] = ~granV21[\boxes].removeAt(\modEnv1Dec);
-
-		~granV21[\sliders][\modEnvDec].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvDec].value.linexp(0, 1, 0.001, 4);
-			~granV21[\params][(prefix ++ "Dec").asSymbol] = v;
-			~granV21[\boxes][\modEnvDec].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvDec].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvDec].value.clip(0.001, 4);
-			~granV21[\params][(prefix ++ "Dec").asSymbol] = v;
-			~granV21[\sliders][\modEnvDec].value = v.explin(0.001, 4, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col3X, topY + 88, "Sus", \modEnv1Sus, 0, 1, \lin, 3);
-		~granV21[\sliders][\modEnvSus] = ~granV21[\sliders].removeAt(\modEnv1Sus);
-		~granV21[\boxes][\modEnvSus] = ~granV21[\boxes].removeAt(\modEnv1Sus);
-
-		~granV21[\sliders][\modEnvSus].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvSus].value.clip(0, 1);
-			~granV21[\params][(prefix ++ "Sus").asSymbol] = v;
-			~granV21[\boxes][\modEnvSus].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvSus].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvSus].value.clip(0, 1);
-			~granV21[\params][(prefix ++ "Sus").asSymbol] = v;
-			~granV21[\sliders][\modEnvSus].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col3X, topY + 118, "Rel", \modEnv1Rel, 0.001, 6, \exp, 3);
-		~granV21[\sliders][\modEnvRel] = ~granV21[\sliders].removeAt(\modEnv1Rel);
-		~granV21[\boxes][\modEnvRel] = ~granV21[\boxes].removeAt(\modEnv1Rel);
-
-		~granV21[\sliders][\modEnvRel].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvRel].value.linexp(0, 1, 0.001, 6);
-			~granV21[\params][(prefix ++ "Rel").asSymbol] = v;
-			~granV21[\boxes][\modEnvRel].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvRel].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvRel].value.clip(0.001, 6);
-			~granV21[\params][(prefix ++ "Rel").asSymbol] = v;
-			~granV21[\sliders][\modEnvRel].value = v.explin(0.001, 6, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col3X, topY + 148, "Depth", \modEnv1Depth, 0, 1, \lin, 3);
-		~granV21[\sliders][\modEnvDepth] = ~granV21[\sliders].removeAt(\modEnv1Depth);
-		~granV21[\boxes][\modEnvDepth] = ~granV21[\boxes].removeAt(\modEnv1Depth);
-
-		~granV21[\sliders][\modEnvDepth].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvDepth].value.clip(0, 1);
-			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
-			~granV21[\boxes][\modEnvDepth].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvDepth].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvDepth].value.clip(0, 1);
-			~granV21[\params][(prefix ++ "Depth").asSymbol] = v;
-			~granV21[\sliders][\modEnvDepth].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-
-		// ------------------------------------------------
-		// COLUMN 4 : DISPLAYED MOD ENV ROUTING
-		// ------------------------------------------------
-		~granV21[\modEnvRoutingTitle] = StaticText(page, Rect(col4X, topY, 180, 20)).string_("Env 1 Routing");
-
-		makeTinyMenuRow.value(page, col4X, topY + 28, "Dest 1", \modEnv1Dest1);
-		~granV21[\menus][\modEnvDest1] = ~granV21[\menus].removeAt(\modEnv1Dest1);
-		~granV21[\menus][\modEnvDest1].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			~granV21[\params][(prefix ++ "Dest1").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col4X, topY + 56, "Amt 1", \modEnv1Amt1, -1, 1, \lin, 3);
-		~granV21[\sliders][\modEnvAmt1] = ~granV21[\sliders].removeAt(\modEnv1Amt1);
-		~granV21[\boxes][\modEnvAmt1] = ~granV21[\boxes].removeAt(\modEnv1Amt1);
-
-		~granV21[\sliders][\modEnvAmt1].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvAmt1].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
-			~granV21[\boxes][\modEnvAmt1].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvAmt1].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvAmt1].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt1").asSymbol] = v;
-			~granV21[\sliders][\modEnvAmt1].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col4X, topY + 96, "Dest 2", \modEnv1Dest2);
-		~granV21[\menus][\modEnvDest2] = ~granV21[\menus].removeAt(\modEnv1Dest2);
-		~granV21[\menus][\modEnvDest2].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			~granV21[\params][(prefix ++ "Dest2").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col4X, topY + 124, "Amt 2", \modEnv1Amt2, -1, 1, \lin, 3);
-		~granV21[\sliders][\modEnvAmt2] = ~granV21[\sliders].removeAt(\modEnv1Amt2);
-		~granV21[\boxes][\modEnvAmt2] = ~granV21[\boxes].removeAt(\modEnv1Amt2);
-
-		~granV21[\sliders][\modEnvAmt2].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvAmt2].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
-			~granV21[\boxes][\modEnvAmt2].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvAmt2].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvAmt2].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt2").asSymbol] = v;
-			~granV21[\sliders][\modEnvAmt2].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col4X, topY + 164, "Dest 3", \modEnv1Dest3);
-		~granV21[\menus][\modEnvDest3] = ~granV21[\menus].removeAt(\modEnv1Dest3);
-		~granV21[\menus][\modEnvDest3].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			~granV21[\params][(prefix ++ "Dest3").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col4X, topY + 192, "Amt 3", \modEnv1Amt3, -1, 1, \lin, 3);
-		~granV21[\sliders][\modEnvAmt3] = ~granV21[\sliders].removeAt(\modEnv1Amt3);
-		~granV21[\boxes][\modEnvAmt3] = ~granV21[\boxes].removeAt(\modEnv1Amt3);
-
-		~granV21[\sliders][\modEnvAmt3].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvAmt3].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
-			~granV21[\boxes][\modEnvAmt3].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvAmt3].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvAmt3].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt3").asSymbol] = v;
-			~granV21[\sliders][\modEnvAmt3].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinyMenuRow.value(page, col4X, topY + 232, "Dest 4", \modEnv1Dest4);
-		~granV21[\menus][\modEnvDest4] = ~granV21[\menus].removeAt(\modEnv1Dest4);
-		~granV21[\menus][\modEnvDest4].action_({ |menu|
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			~granV21[\params][(prefix ++ "Dest4").asSymbol] = menu.value;
-			~granV21[\updateAllVoices].value;
-		});
-
-		makeTinySliderRow.value(page, col4X, topY + 260, "Amt 4", \modEnv1Amt4, -1, 1, \lin, 3);
-		~granV21[\sliders][\modEnvAmt4] = ~granV21[\sliders].removeAt(\modEnv1Amt4);
-		~granV21[\boxes][\modEnvAmt4] = ~granV21[\boxes].removeAt(\modEnv1Amt4);
-
-		~granV21[\sliders][\modEnvAmt4].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\sliders][\modEnvAmt4].value.linlin(0, 1, -1, 1);
-			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
-			~granV21[\boxes][\modEnvAmt4].value = v;
-			~granV21[\updateAllVoices].value;
-		});
-		~granV21[\boxes][\modEnvAmt4].action_({
-			var prefix = if((~granV21[\modUi][\envIndex] ? 1) == 1) { "modEnv1" } { "modEnv2" };
-			var v = ~granV21[\boxes][\modEnvAmt4].value.clip(-1, 1);
-			~granV21[\params][(prefix ++ "Amt4").asSymbol] = v;
-			~granV21[\sliders][\modEnvAmt4].value = v.linlin(-1, 1, 0, 1);
-			~granV21[\updateAllVoices].value;
-		});
-
-		~granV21[\refreshModLfoUi].value;
-		~granV21[\refreshModEnvUi].value;
-
-		~granV21[\pages].add(page);
-	}.value;
-
-
-	// page 8 - Perform
-	{
-		var page = CompositeView(~granV21[\win], Rect(16, 330, 1088, 410))
-			.background_(Color.white);
-var targets = [
-	[\aPosition, "aPosition"],
-	[\bPosition, "bPosition"],
-	[\regionStart, "regionStart"],
-	[\regionEnd, "regionEnd"],
-	[\aJitter, "aJitter"],
-	[\bJitter, "bJitter"],
-	[\aDensity, "aDensity"],
-	[\bDensity, "bDensity"],
-	[\aScanWidth, "aScanWidth"],
-	[\bScanWidth, "bScanWidth"],
-	[\rateA, "rateA"],
-	[\rateB, "rateB"],
-	[\lpf, "lpf"],
-	[\hpf, "hpf"],
-	[\oscCutoff, "oscCutoff"],
-	[\masterAmp, "masterAmp"]
-];
-
-var targetSymbols = targets.collect { |pair| pair[0] };
-var targetLabels = targets.collect { |pair| pair[1] };
-
-		StaticText(page, Rect(12, 10, 250, 20)).string_("Perform / XY / MIDI");
-
-			~granV21[\statusStrip] = StaticText(page, Rect(12, 32, 1036, 18))
-	.string_("Buffer: No sample loaded")
-	.align_(\left);
-
-		StaticText(page, Rect(12, 58, 80, 20)).string_("X Target");
-PopUpMenu(page, Rect(95, 58, 160, 20))
-	.items_(targetLabels)
-	.value_(targetSymbols.indexOfEqual(~granV21[\params][\xyXTarget]) ? 0)
-	.action_({ |pm|
-		~granV21[\params][\xyXTarget] = targetSymbols[pm.value];
-	});
-
-StaticText(page, Rect(270, 58, 80, 20)).string_("Y Target");
-PopUpMenu(page, Rect(352, 58, 160, 20))
-	.items_(targetLabels)
-	.value_(targetSymbols.indexOfEqual(~granV21[\params][\xyYTarget]) ? 0)
-	.action_({ |pm|
-		~granV21[\params][\xyYTarget] = targetSymbols[pm.value];
-	});
-
-
-
-		StaticText(page, Rect(540, 58, 70, 20)).string_("Freeze");
-~granV21[\toggles][\freezeOn] = Button(page, Rect(610, 58, 80, 22))
-	.states_([["Off"], ["On"]])
-	.value_(~granV21[\params][\freezeOn])
-	.action_({ |bt|
-		if(bt.value == 1) {
-			if((~granV21[\params][\freezeOn] ? 0) == 0) {
-				~granV21[\toggleFreeze].value;
+		var targetSyms = targets.collect { |x| x[0] };
+		var targetLabels = targets.collect { |x| x[1] };
+		app[\xyTargetSymbols] = targetSyms;
+		StaticText(page, Rect(12, 8, 220, 20)).string_("MIDI / Perform");
+		app[\labels][\voiceCount] = StaticText(page, Rect(12, 36, 220, 20)).string_("Active voices: 0");
+		makeSliderRow.value(page, 12, 68, "MIDI Channel", \midiChannel, 0, 16, \lin, 0);
+		makeSliderRow.value(page, 12, 98, "Bend Range", \bendRange, 1, 12, \lin, 0);
+		makeToggleRow.value(page, 12, 128, "Sustain", \sustainOn);
+		makeSliderRow.value(page, 12, 158, "Mod Wheel", \modWheel, 0, 1, \lin, 3);
+		makeSliderRow.value(page, 12, 188, "Aftertouch", \aftertouch, 0, 1, \lin, 3);
+		StaticText(page, Rect(560, 42, 80, 20)).string_("X Target");
+		app[\menus][\xyXTargetMenu] = PopUpMenu(page, Rect(640, 42, 160, 20)).items_(targetLabels).value_(0).action_({ |pm| app[\params][\xyXTarget] = targetSyms[pm.value] });
+		StaticText(page, Rect(820, 42, 80, 20)).string_("Y Target");
+		app[\menus][\xyYTargetMenu] = PopUpMenu(page, Rect(900, 42, 160, 20)).items_(targetLabels).value_(2).action_({ |pm| app[\params][\xyYTarget] = targetSyms[pm.value] });
+		app[\xyView] = UserView(page, Rect(560, 82, 360, 250)).background_(Color.black);
+		app[\applyXY] = { |x, y|
+			var p = app[\params];
+			var applyTarget = { |target, value|
+				switch(target,
+					\gr1Position, { p[\gr1Position] = value.clip(0, 1) },
+					\gr2Position, { p[\gr2Position] = value.clip(0, 1) },
+					\gr1Jitter, { p[\gr1Jitter] = value.clip(0, 1) },
+					\gr2Jitter, { p[\gr2Jitter] = value.clip(0, 1) },
+					\gr1Density, { p[\gr1Density] = value.linexp(0, 1, 0.5, 120) },
+					\gr2Density, { p[\gr2Density] = value.linexp(0, 1, 0.5, 120) },
+					\filter1Cutoff, { p[\filter1Cutoff] = value.linexp(0, 1, 20, 20400) },
+					\filter2Cutoff, { p[\filter2Cutoff] = value.linexp(0, 1, 20, 20400) },
+					\oscCutoff, { p[\oscCutoff] = value.linexp(0, 1, 80, 20000) },
+					\masterAmp, { p[\masterAmp] = value.clip(0, 1) }
+				);
 			};
-		} {
-			if((~granV21[\params][\freezeOn] ? 0) == 1) {
-				~granV21[\toggleFreeze].value;
-			};
+			p[\xyX] = x.clip(0, 1);
+			p[\xyY] = y.clip(0, 1);
+			applyTarget.value(p[\xyXTarget], p[\xyX]);
+			applyTarget.value(p[\xyYTarget], p[\xyY]);
+			app[\syncControls].value;
+			app[\updateAllVoices].value;
 		};
-	});
-
-StaticText(page, Rect(705, 58, 60, 20)).string_("Source");
-~granV21[\menus][\freezeSourceMode] = PopUpMenu(page, Rect(765, 58, 140, 20))
-	.items_(["Current Buffer", "Live Buffer"])
-	.value_(~granV21[\params][\freezeSourceMode] ? 0)
-	.action_({ |pm|
-		~granV21[\params][\freezeSourceMode] = pm.value;
-	});
-
-Button(page, Rect(920, 58, 128, 22))
-	.states_([["Capture -> Freeze"]])
-	.action_({
-		if((~granV21[\params][\freezeSourceMode] ? 0) == 1) {
-			~granV21[\captureLiveToFreeze].value;
-		} {
-			~granV21[\captureCurrentToFreeze].value;
-		};
-	});
-
-
-		StaticText(page, Rect(540, 90, 80, 20)).string_("Freeze Lock");
-
-~granV21[\toggles][\freezeLockA] = Button(page, Rect(625, 90, 72, 22))
-	.states_([["A Off"], ["A On"]])
-	.value_(~granV21[\params][\freezeLockA])
-	.action_({ |bt|
-		~granV21[\params][\freezeLockA] = bt.value.asInteger;
-		if(bt.value == 1) {
-			~granV21[\params][\freezePosA] = ~granV21[\params][\aPosition].clip(0, 1);
-		};
-		~granV21[\updateAllVoices].value;
-	});
-
-~granV21[\toggles][\freezeLockB] = Button(page, Rect(705, 90, 72, 22))
-	.states_([["B Off"], ["B On"]])
-	.value_(~granV21[\params][\freezeLockB])
-	.action_({ |bt|
-		~granV21[\params][\freezeLockB] = bt.value.asInteger;
-		if(bt.value == 1) {
-			~granV21[\params][\freezePosB] = ~granV21[\params][\bPosition].clip(0, 1);
-		};
-		~granV21[\updateAllVoices].value;
-	});
-
-		~granV21[\xyView] = UserView(page, Rect(12, 120, 360, 220))
-			.background_(Color.black);
-
-		~granV21[\xyView].drawFunc_({
-			var p = ~granV21[\params];
-			var b = ~granV21[\xyView].bounds;
-			var x = p[\xyX] * b.width;
-			var y = (1 - p[\xyY]) * b.height;
-
-			Pen.fillColor = Color.black;
-			Pen.fillRect(Rect(0, 0, b.width, b.height));
-
+		app[\xyView].drawFunc_({
+			var p, b;
+			p = app[\params];
+			b = app[\xyView].bounds;
+			Pen.fillColor = Color.black; Pen.fillRect(Rect(0, 0, b.width, b.height));
 			Pen.color = Color.gray(0.25);
-			Pen.moveTo(Point(b.width * 0.5, 0));
-			Pen.lineTo(Point(b.width * 0.5, b.height));
-			Pen.stroke;
-			Pen.moveTo(Point(0, b.height * 0.5));
-			Pen.lineTo(Point(b.width, b.height * 0.5));
-			Pen.stroke;
-
+			Pen.moveTo(Point(b.width * 0.5, 0)); Pen.lineTo(Point(b.width * 0.5, b.height)); Pen.stroke;
+			Pen.moveTo(Point(0, b.height * 0.5)); Pen.lineTo(Point(b.width, b.height * 0.5)); Pen.stroke;
 			Pen.fillColor = Color.cyan.alpha_(0.85);
-			Pen.fillOval(Rect.aboutPoint(Point(x, y), 8, 8));
+			Pen.fillOval(Rect.aboutPoint(Point(p[\xyX] * b.width, (1 - p[\xyY]) * b.height), 8, 8));
 		});
-
-		~granV21[\xyView].mouseDownAction_({ |view, x, y|
-			var p = ~granV21[\params];
-			p[\xyX] = (x / view.bounds.width).clip(0, 1);
-			p[\xyY] = (1 - (y / view.bounds.height)).clip(0, 1);
-			~granV21[\applyXYTarget].value(p[\xyXTarget], p[\xyX]);
-			~granV21[\applyXYTarget].value(p[\xyYTarget], p[\xyY]);
-			view.refresh;
-		});
-
-		~granV21[\xyView].mouseMoveAction_({ |view, x, y|
-			var p = ~granV21[\params];
-			p[\xyX] = (x / view.bounds.width).clip(0, 1);
-			p[\xyY] = (1 - (y / view.bounds.height)).clip(0, 1);
-			~granV21[\applyXYTarget].value(p[\xyXTarget], p[\xyX]);
-			~granV21[\applyXYTarget].value(p[\xyYTarget], p[\xyY]);
-			view.refresh;
-		});
-
-		StaticText(page, Rect(400, 130, 620, 180))
-			.string_(
-				"MIDI behavior in 2.1:\n"
-				++ "• note-on = create voice\n"
-				++ "• note-off = release voice\n"
-				++ "• overlapping notes can coexist\n"
-				++ "• if a note retriggers, the old one is replaced cleanly\n\n"
-				++ "Suggested XY assignments:\n"
-				++ "• X position / Y aJitter\n"
-				++ "• X position / Y lpf\n"
-				++ "• X aDensity / Y bDensity\n"
-				++ "• X regionStart / Y regionEnd"
-			);
-
-		~granV21[\pages].add(page);
+		app[\xyView].mouseDownAction_({ |view, x, y| app[\applyXY].value(x / view.bounds.width, 1 - (y / view.bounds.height)); view.refresh });
+		app[\xyView].mouseMoveAction_({ |view, x, y| app[\applyXY].value(x / view.bounds.width, 1 - (y / view.bounds.height)); view.refresh });
+		StaticText(page, Rect(560, 350, 480, 80)).string_("MIDI support: Note On/Off, channel filter, sustain CC64, mod wheel CC1, pitch bend, channel/poly aftertouch, learned CC modulation slots, program change monitor, and MIDI clock tempo follow.");
+		app[\pages].add(page);
 	}.value;
 
-	~granV21[\showPage].value(0);
-~granV21[\win].front;
-~granV21[\syncControls].value;
-if(~granV21[\refreshStatusStrip].notNil) { ~granV21[\refreshStatusStrip].value; };
-~granV21[\startVisualizer].value;
+	// Boot UI
+	app[\setupMIDI].value;
+	app[\showPage].value(0);
+	app[\refreshWaveData].value;
+	app[\syncControls].value;
+	app[\startVisualizer].value;
+	app[\win].front;
 
 	// --------------------------------------------------------
-	// free
+	// Cleanup
 	// --------------------------------------------------------
-	~granV21[\free] = {
-		try { ~granV21[\panic].value } { };
-		~granV21[\stopVisualizer].value;
-
-		if(~granV21[\recSynth].notNil) {
-			try { ~granV21[\recSynth].free } { };
-			~granV21[\recSynth] = nil;
+	app[\free] = {
+		try { app[\panic].value } { };
+		try { app[\stopVisualizer].value } { };
+		if(app[\liveRecorder].notNil) { try { app[\liveRecorder].free } { } };
+		[\gr1Buf, \gr2Buf].do { |key|
+			if(app[key].notNil and: { app[key] != app[\emptyBuf] }) { try { app[key].free } { } };
 		};
-
-		if(~granV21[\sampleBuf].notNil) {
-			try { ~granV21[\sampleBuf].free } { };
-			~granV21[\sampleBuf] = nil;
+		if(app[\liveBuf].notNil) { try { app[\liveBuf].free } { } };
+		if(app[\emptyBuf].notNil) { try { app[\emptyBuf].free } { } };
+		if(app[\midiObjs].notNil) { app[\midiObjs].do { |obj| try { obj.free } { } } };
+		if(app[\win].notNil) {
+			var w = app[\win];
+			app[\win] = nil;
+			try { w.onClose_({}) } { };
+			try { w.close } { };
 		};
-
-		if(~granV21[\liveBuf].notNil) {
-			try { ~granV21[\liveBuf].free } { };
-			~granV21[\liveBuf] = nil;
-		};
-
-		if(~granV21[\freezeBuf].notNil) {
-	try { ~granV21[\freezeBuf].free } { };
-	~granV21[\freezeBuf] = nil;
-};
-
-		if(~granV21[\midiObjs].notNil) {
-			~granV21[\midiObjs].do { |obj|
-				try { obj.free } { };
-			};
-		};
-
-	if(~granV21[\win].notNil) {
-	var w = ~granV21[\win];
-	~granV21[\win] = nil;
-	try { w.onClose_({}) } { };
-	try { w.close } { };
-};
 	};
-
 });
 )
